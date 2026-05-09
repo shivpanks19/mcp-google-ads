@@ -1,5 +1,7 @@
 # MCP requirements
 mcp>=0.0.11
+uvicorn>=0.27.0
+starlette>=0.37.0
 
 # Google API requirements
 google-auth>=2.25.2
