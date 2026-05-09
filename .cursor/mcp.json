@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "my-server": {
+      "url": "https://mcp-google-ads-production-a615.up.railway.app/sse",
+      "headers": {}
+    }
+  }
+}
