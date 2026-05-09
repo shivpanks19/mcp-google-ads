@@ -32,7 +32,7 @@ mcp = FastMCP(
 
 # Constants and configuration
 SCOPES = ['https://www.googleapis.com/auth/adwords']
-API_VERSION = "v19"  # Google Ads API version
+API_VERSION = "v24"  # Google Ads API version
 
 # Load environment variables
 try:
@@ -201,46 +201,90 @@ def get_oauth_credentials():
     
     return creds
 
-def get_headers(creds):
-    """Get headers for Google Ads API requests."""
+def _get_bearer_token(creds):
+    """Extract and refresh bearer token from credentials if needed."""
+    if isinstance(creds, service_account.Credentials):
+        creds.refresh(Request())
+        return creds.token
+    
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
+            try:
+                logger.info("Refreshing expired OAuth token in get_headers")
+                creds.refresh(Request())
+                logger.info("Token successfully refreshed in get_headers")
+            except RefreshError as e:
+                logger.error(f"Error refreshing token in get_headers: {str(e)}")
+                raise ValueError(f"Failed to refresh OAuth token: {str(e)}")
+            except Exception as e:
+                logger.error(f"Unexpected error refreshing token in get_headers: {str(e)}")
+                raise
+        else:
+            raise ValueError("OAuth credentials are invalid and cannot be refreshed")
+    return creds.token
+
+
+def get_headers(creds, include_login_customer_id: bool = False):
+    """Get headers for Google Ads API requests.
+
+    Args:
+        creds: OAuth or service account credentials.
+        include_login_customer_id: Whether to include the login-customer-id header.
+            Defaults to False because most client accounts are accessible without it.
+            Set to True only when explicitly querying through an MCC manager account.
+    """
     if not GOOGLE_ADS_DEVELOPER_TOKEN:
         raise ValueError("GOOGLE_ADS_DEVELOPER_TOKEN environment variable not set")
-    
-    # Handle different credential types
-    if isinstance(creds, service_account.Credentials):
-        # For service account, we need to get a new bearer token
-        auth_req = Request()
-        creds.refresh(auth_req)
-        token = creds.token
-    else:
-        # For OAuth credentials, check if token needs refresh
-        if not creds.valid:
-            if creds.expired and creds.refresh_token:
-                try:
-                    logger.info("Refreshing expired OAuth token in get_headers")
-                    creds.refresh(Request())
-                    logger.info("Token successfully refreshed in get_headers")
-                except RefreshError as e:
-                    logger.error(f"Error refreshing token in get_headers: {str(e)}")
-                    raise ValueError(f"Failed to refresh OAuth token: {str(e)}")
-                except Exception as e:
-                    logger.error(f"Unexpected error refreshing token in get_headers: {str(e)}")
-                    raise
-            else:
-                raise ValueError("OAuth credentials are invalid and cannot be refreshed")
-        
-        token = creds.token
-        
+
+    token = _get_bearer_token(creds)
+
     headers = {
         'Authorization': f'Bearer {token}',
         'developer-token': GOOGLE_ADS_DEVELOPER_TOKEN,
         'content-type': 'application/json'
     }
-    
-    if GOOGLE_ADS_LOGIN_CUSTOMER_ID:
+
+    if include_login_customer_id and GOOGLE_ADS_LOGIN_CUSTOMER_ID:
         headers['login-customer-id'] = format_customer_id(GOOGLE_ADS_LOGIN_CUSTOMER_ID)
-    
+
     return headers
+
+
+def make_api_request(url: str, method: str = 'POST', payload: dict = None, creds=None):
+    """Make a Google Ads API request, automatically retrying without login-customer-id on permission errors.
+    
+    Returns:
+        (response_json, error_string) — one of which will be None.
+    """
+    if creds is None:
+        creds = get_credentials()
+
+    for include_login in (True, False):
+        headers = get_headers(creds, include_login_customer_id=include_login)
+        if method == 'GET':
+            resp = requests.get(url, headers=headers)
+        else:
+            resp = requests.post(url, headers=headers, json=payload or {})
+
+        if resp.status_code == 200:
+            return resp.json(), None
+
+        # On permission errors, retry without login-customer-id
+        if include_login and resp.status_code == 403:
+            try:
+                err_code = (resp.json().get('error', {})
+                            .get('details', [{}])[0]
+                            .get('errors', [{}])[0]
+                            .get('errorCode', {}))
+                if 'USER_PERMISSION_DENIED' in err_code.values() or 'CUSTOMER_NOT_ENABLED' in err_code.values():
+                    logger.info("Permission denied with login-customer-id, retrying without it")
+                    continue
+            except Exception:
+                pass
+
+        return None, resp.text
+
+    return None, "Request failed after retrying without login-customer-id"
 
 @mcp.tool()
 async def list_accounts() -> str:
@@ -255,15 +299,13 @@ async def list_accounts() -> str:
     """
     try:
         creds = get_credentials()
-        headers = get_headers(creds)
-        
         url = f"https://googleads.googleapis.com/{API_VERSION}/customers:listAccessibleCustomers"
-        response = requests.get(url, headers=headers)
-        
-        if response.status_code != 200:
-            return f"Error accessing accounts: {response.text}"
-        
-        customers = response.json()
+        data, error = make_api_request(url, method='GET', creds=creds)
+
+        if error:
+            return f"Error accessing accounts: {error}"
+
+        customers = data
         if not customers.get('resourceNames'):
             return "No accessible accounts found."
         
