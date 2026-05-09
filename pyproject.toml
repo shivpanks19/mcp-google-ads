@@ -34,4 +34,5 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["mcp_google_ads"]
+# Source lives as top-level modules in the repo root (no `mcp_google_ads/` package).
+py-modules = ["google_ads_server", "main"]
