@@ -49,6 +49,33 @@ GOOGLE_ADS_DEVELOPER_TOKEN = os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN")
 GOOGLE_ADS_LOGIN_CUSTOMER_ID = os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID", "")
 GOOGLE_ADS_AUTH_TYPE = os.environ.get("GOOGLE_ADS_AUTH_TYPE", "oauth")  # oauth or service_account
 
+
+def _load_credentials_dict_from_env() -> Optional[Dict[str, Any]]:
+    """Parse GOOGLE_ADS_CREDENTIALS_JSON if set (e.g. Railway secret). Returns None if unset or empty."""
+    raw = os.environ.get("GOOGLE_ADS_CREDENTIALS_JSON")
+    if raw is None or not str(raw).strip():
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"GOOGLE_ADS_CREDENTIALS_JSON must be valid JSON: {e}") from e
+    if not isinstance(data, dict):
+        raise ValueError("GOOGLE_ADS_CREDENTIALS_JSON must be a JSON object")
+    return data
+
+
+def _oauth_user_token_path() -> str:
+    """Where to persist OAuth user tokens (refresh). Uses PATH if set, else TMPDIR."""
+    if GOOGLE_ADS_CREDENTIALS_PATH and str(GOOGLE_ADS_CREDENTIALS_PATH).strip():
+        token_path = str(GOOGLE_ADS_CREDENTIALS_PATH).strip()
+        if os.path.exists(token_path) and not os.path.basename(token_path).endswith(".json"):
+            token_dir = os.path.dirname(token_path) or "."
+            token_path = os.path.join(token_dir, "google_ads_token.json")
+        return token_path
+    base = os.environ.get("TMPDIR", "/tmp")
+    return os.path.join(base, "google_ads_token.json")
+
+
 def format_customer_id(customer_id: str) -> str:
     """Format customer ID to ensure it's 10 digits without dashes."""
     # Convert to string if passed as integer or another type
@@ -63,6 +90,7 @@ def format_customer_id(customer_id: str) -> str:
     # Ensure it's 10 digits with leading zeros if needed
     return customer_id.zfill(10)
 
+
 def get_credentials():
     """
     Get and refresh OAuth credentials or service account credentials based on the auth type.
@@ -74,8 +102,10 @@ def get_credentials():
     Returns:
         Valid credentials object to use with Google Ads API
     """
-    if not GOOGLE_ADS_CREDENTIALS_PATH:
-        raise ValueError("GOOGLE_ADS_CREDENTIALS_PATH environment variable not set")
+    if not (GOOGLE_ADS_CREDENTIALS_PATH and str(GOOGLE_ADS_CREDENTIALS_PATH).strip()) and _load_credentials_dict_from_env() is None:
+        raise ValueError(
+            "Set GOOGLE_ADS_CREDENTIALS_JSON or GOOGLE_ADS_CREDENTIALS_PATH to load Google Ads credentials"
+        )
     
     auth_type = GOOGLE_ADS_AUTH_TYPE.lower()
     logger.info(f"Using authentication type: {auth_type}")
@@ -92,62 +122,89 @@ def get_credentials():
     return get_oauth_credentials()
 
 def get_service_account_credentials():
-    """Get credentials using a service account key file."""
-    logger.info(f"Loading service account credentials from {GOOGLE_ADS_CREDENTIALS_PATH}")
-    
-    if not os.path.exists(GOOGLE_ADS_CREDENTIALS_PATH):
-        raise FileNotFoundError(f"Service account key file not found at {GOOGLE_ADS_CREDENTIALS_PATH}")
-    
-    try:
-        credentials = service_account.Credentials.from_service_account_file(
-            GOOGLE_ADS_CREDENTIALS_PATH, 
-            scopes=SCOPES
-        )
-        
-        # Check if impersonation is required
-        impersonation_email = os.environ.get("GOOGLE_ADS_IMPERSONATION_EMAIL")
-        if impersonation_email:
-            logger.info(f"Impersonating user: {impersonation_email}")
-            credentials = credentials.with_subject(impersonation_email)
-            
-        return credentials
-        
-    except Exception as e:
-        logger.error(f"Error loading service account credentials: {str(e)}")
-        raise
+    """Get credentials using a service account key from env JSON or key file."""
+    creds_dict = _load_credentials_dict_from_env()
+    if creds_dict is not None:
+        logger.info("Loading service account credentials from GOOGLE_ADS_CREDENTIALS_JSON")
+        if creds_dict.get("type") != "service_account":
+            raise ValueError(
+                'GOOGLE_ADS_CREDENTIALS_JSON must be a service account key ({"type": "service_account", ...})'
+            )
+        try:
+            credentials = service_account.Credentials.from_service_account_info(
+                creds_dict,
+                scopes=SCOPES,
+            )
+        except Exception as e:
+            logger.error(f"Error loading service account credentials from JSON: {str(e)}")
+            raise
+    else:
+        logger.info(f"Loading service account credentials from {GOOGLE_ADS_CREDENTIALS_PATH}")
+        if not GOOGLE_ADS_CREDENTIALS_PATH or not os.path.exists(GOOGLE_ADS_CREDENTIALS_PATH):
+            raise FileNotFoundError(
+                f"Service account key file not found at {GOOGLE_ADS_CREDENTIALS_PATH}"
+            )
+        try:
+            credentials = service_account.Credentials.from_service_account_file(
+                GOOGLE_ADS_CREDENTIALS_PATH,
+                scopes=SCOPES,
+            )
+        except Exception as e:
+            logger.error(f"Error loading service account credentials: {str(e)}")
+            raise
+
+    impersonation_email = os.environ.get("GOOGLE_ADS_IMPERSONATION_EMAIL")
+    if impersonation_email:
+        logger.info(f"Impersonating user: {impersonation_email}")
+        credentials = credentials.with_subject(impersonation_email)
+
+    return credentials
+
 
 def get_oauth_credentials():
-    """Get and refresh OAuth user credentials."""
+    """Get and refresh OAuth user credentials from env JSON and/or token file."""
     creds = None
     client_config = None
-    
-    # Path to store the refreshed token
-    token_path = GOOGLE_ADS_CREDENTIALS_PATH
-    if os.path.exists(token_path) and not os.path.basename(token_path).endswith('.json'):
-        # If it's not explicitly a .json file, append a default name
-        token_dir = os.path.dirname(token_path)
-        token_path = os.path.join(token_dir, 'google_ads_token.json')
-    
-    # Check if token file exists and load credentials
-    if os.path.exists(token_path):
-        try:
-            logger.info(f"Loading OAuth credentials from {token_path}")
-            with open(token_path, 'r') as f:
-                creds_data = json.load(f)
-                # Check if this is a client config or saved credentials
-                if "installed" in creds_data or "web" in creds_data:
-                    client_config = creds_data
-                    logger.info("Found OAuth client configuration")
-                else:
-                    logger.info("Found existing OAuth token")
-                    creds = Credentials.from_authorized_user_info(creds_data, SCOPES)
-        except json.JSONDecodeError:
-            logger.warning(f"Invalid JSON in token file: {token_path}")
-            creds = None
-        except Exception as e:
-            logger.warning(f"Error loading credentials: {str(e)}")
-            creds = None
-    
+    creds_dict = _load_credentials_dict_from_env()
+
+    if creds_dict is not None:
+        if creds_dict.get("type") == "service_account":
+            raise ValueError(
+                "GOOGLE_ADS_CREDENTIALS_JSON is a service account key; "
+                "set GOOGLE_ADS_AUTH_TYPE=service_account instead of oauth"
+            )
+        if "installed" in creds_dict or "web" in creds_dict:
+            client_config = creds_dict
+            logger.info("Found OAuth client configuration in GOOGLE_ADS_CREDENTIALS_JSON")
+        else:
+            logger.info("Loading OAuth user credentials from GOOGLE_ADS_CREDENTIALS_JSON")
+            creds = Credentials.from_authorized_user_info(creds_dict, SCOPES)
+        token_path = _oauth_user_token_path()
+    else:
+        # Path to store the refreshed token
+        token_path = GOOGLE_ADS_CREDENTIALS_PATH
+        if token_path and os.path.exists(token_path) and not os.path.basename(token_path).endswith(".json"):
+            token_dir = os.path.dirname(token_path)
+            token_path = os.path.join(token_dir, "google_ads_token.json")
+
+        if token_path and os.path.exists(token_path):
+            try:
+                logger.info(f"Loading OAuth credentials from {token_path}")
+                with open(token_path, "r") as f:
+                    creds_data = json.load(f)
+                    if "installed" in creds_data or "web" in creds_data:
+                        client_config = creds_data
+                        logger.info("Found OAuth client configuration")
+                    else:
+                        logger.info("Found existing OAuth token")
+                        creds = Credentials.from_authorized_user_info(creds_data, SCOPES)
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON in token file: {token_path}")
+                creds = None
+            except Exception as e:
+                logger.warning(f"Error loading credentials: {str(e)}")
+                creds = None
+
     # If credentials don't exist or are invalid, get new ones
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
@@ -161,45 +218,45 @@ def get_oauth_credentials():
             except Exception as e:
                 logger.error(f"Unexpected error refreshing token: {str(e)}")
                 raise
-        
-        # If we need new credentials
+
         if not creds:
-            # If no client_config is defined yet, create one from environment variables
             if not client_config:
                 logger.info("Creating OAuth client config from environment variables")
                 client_id = os.environ.get("GOOGLE_ADS_CLIENT_ID")
                 client_secret = os.environ.get("GOOGLE_ADS_CLIENT_SECRET")
-                
+
                 if not client_id or not client_secret:
-                    raise ValueError("GOOGLE_ADS_CLIENT_ID and GOOGLE_ADS_CLIENT_SECRET must be set if no client config file exists")
-                
+                    raise ValueError(
+                        "GOOGLE_ADS_CLIENT_ID and GOOGLE_ADS_CLIENT_SECRET must be set if no client config file exists"
+                    )
+
                 client_config = {
                     "installed": {
                         "client_id": client_id,
                         "client_secret": client_secret,
                         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                         "token_uri": "https://oauth2.googleapis.com/token",
-                        "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"]
+                        "redirect_uris": ["urn:ietf:wg:oauth:2.0:oob", "http://localhost"],
                     }
                 }
-            
-            # Run the OAuth flow
+
             logger.info("Starting OAuth authentication flow")
             flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
             creds = flow.run_local_server(port=0)
             logger.info("OAuth flow completed successfully")
-        
-        # Save the refreshed/new credentials
+
         try:
             logger.info(f"Saving credentials to {token_path}")
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(token_path), exist_ok=True)
-            with open(token_path, 'w') as f:
+            parent = os.path.dirname(token_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(token_path, "w") as f:
                 f.write(creds.to_json())
         except Exception as e:
             logger.warning(f"Could not save credentials: {str(e)}")
-    
+
     return creds
+
 
 def _get_bearer_token(creds):
     """Extract and refresh bearer token from credentials if needed."""

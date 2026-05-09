@@ -144,7 +144,9 @@ if __name__ == "__main__":
     # test_format_customer_id()
     
     # Setup environment variables if they're not already set
-    if not os.environ.get("GOOGLE_ADS_CREDENTIALS_PATH"):
+    if not os.environ.get("GOOGLE_ADS_CREDENTIALS_PATH") and not os.environ.get(
+        "GOOGLE_ADS_CREDENTIALS_JSON"
+    ):
         # Set environment variables for testing (comment out if already set in your environment)
         os.environ["GOOGLE_ADS_CREDENTIALS_PATH"] = "google_ads_token.json"
         os.environ["GOOGLE_ADS_DEVELOPER_TOKEN"] = "YOUR_DEVELOPER_TOKEN"  # Replace with placeholder
