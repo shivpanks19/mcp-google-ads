@@ -20,11 +20,25 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('google_ads_server')
 
-# PaaS (Railway, Render, Fly): proxy must reach the process on 0.0.0.0 and PORT.
-# Must run before FastMCP() — some SDK builds default uvicorn to 127.0.0.1:8000 otherwise.
-if os.environ.get("PORT"):
-    os.environ.setdefault("FASTMCP_PORT", os.environ["PORT"])
-    os.environ.setdefault("FASTMCP_HOST", "0.0.0.0")
+
+def _fastmcp_listen_host_port() -> tuple[str, int]:
+    """
+    Host/port for SSE / streamable-http.
+
+    The MCP Python SDK passes host and port explicitly into Settings(), so
+    FASTMCP_HOST / FASTMCP_PORT env vars alone are ignored unless we pass them here.
+    """
+    if os.environ.get("PORT"):
+        return ("0.0.0.0", int(os.environ["PORT"]))
+    host = os.environ.get("FASTMCP_HOST", "127.0.0.1")
+    try:
+        port = int(os.environ.get("FASTMCP_PORT", "8000"))
+    except ValueError:
+        port = 8000
+    return (host, port)
+
+
+_fm_host, _fm_port = _fastmcp_listen_host_port()
 
 mcp = FastMCP(
     "google-ads-server",
@@ -33,7 +47,9 @@ mcp = FastMCP(
         "google-auth",
         "requests",
         "python-dotenv"
-    ]
+    ],
+    host=_fm_host,
+    port=_fm_port,
 )
 
 # Constants and configuration
