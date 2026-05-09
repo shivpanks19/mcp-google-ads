@@ -49,6 +49,14 @@ try:
 except ImportError:
     logger.warning("python-dotenv not installed, skipping .env file loading")
 
+# Some platforms inject OAuth/SA JSON into GOOGLE_ADS_CREDENTIALS_PATH; treat as JSON if not a file path.
+_cred_path_raw = os.environ.get("GOOGLE_ADS_CREDENTIALS_PATH")
+if _cred_path_raw and str(_cred_path_raw).strip().startswith("{") and not os.path.isfile(str(_cred_path_raw).strip()):
+    if not os.environ.get("GOOGLE_ADS_CREDENTIALS_JSON"):
+        os.environ["GOOGLE_ADS_CREDENTIALS_JSON"] = str(_cred_path_raw).strip()
+    del os.environ["GOOGLE_ADS_CREDENTIALS_PATH"]
+    logger.info("Using GOOGLE_ADS_CREDENTIALS_JSON (JSON was set in GOOGLE_ADS_CREDENTIALS_PATH)")
+
 # Get credentials from environment variables
 GOOGLE_ADS_CREDENTIALS_PATH = os.environ.get("GOOGLE_ADS_CREDENTIALS_PATH")
 GOOGLE_ADS_DEVELOPER_TOKEN = os.environ.get("GOOGLE_ADS_DEVELOPER_TOKEN")
