@@ -20,6 +20,12 @@ from mcp.server.fastmcp import FastMCP
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('google_ads_server')
 
+# PaaS (Railway, Render, Fly): proxy must reach the process on 0.0.0.0 and PORT.
+# Must run before FastMCP() — some SDK builds default uvicorn to 127.0.0.1:8000 otherwise.
+if os.environ.get("PORT"):
+    os.environ.setdefault("FASTMCP_PORT", os.environ["PORT"])
+    os.environ.setdefault("FASTMCP_HOST", "0.0.0.0")
+
 mcp = FastMCP(
     "google-ads-server",
     dependencies=[
