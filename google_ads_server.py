@@ -2,6 +2,7 @@ from typing import Any, Dict, List, Optional, Union
 from pydantic import Field
 import os
 import json
+import webbrowser
 import requests
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -111,6 +112,45 @@ def format_customer_id(customer_id: str) -> str:
     
     # Ensure it's 10 digits with leading zeros if needed
     return customer_id.zfill(10)
+
+
+def _oauth_prefers_browser_open() -> bool:
+    """Whether to ask the OS to open the OAuth authorize URL in a GUI browser."""
+    raw = os.environ.get("GOOGLE_ADS_OAUTH_OPEN_BROWSER", "").strip().lower()
+    if raw in ("0", "false", "no"):
+        return False
+    if raw in ("1", "true", "yes"):
+        return True
+    try:
+        webbrowser.get()
+    except webbrowser.Error:
+        return False
+    return True
+
+
+def _run_oauth_installed_flow(client_config: dict) -> Credentials:
+    """Run installed-app OAuth; falls back when no runnable browser is available (CI, servers, SSH)."""
+    open_browser = _oauth_prefers_browser_open()
+    flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+    try:
+        return flow.run_local_server(port=0, open_browser=open_browser)
+    except webbrowser.Error:
+        logger.warning(
+            "OAuth could not use a system browser; retrying with open_browser=False. "
+            "Open the printed authorization URL manually if prompted."
+        )
+        flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+        return flow.run_local_server(port=0, open_browser=False)
+    except Exception as e:
+        err = str(e).lower()
+        if open_browser and "browser" in err:
+            logger.warning(
+                "OAuth browser step failed (%s); retrying with open_browser=False.",
+                e,
+            )
+            flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
+            return flow.run_local_server(port=0, open_browser=False)
+        raise
 
 
 def get_credentials():
@@ -263,8 +303,7 @@ def get_oauth_credentials():
                 }
 
             logger.info("Starting OAuth authentication flow")
-            flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = _run_oauth_installed_flow(client_config)
             logger.info("OAuth flow completed successfully")
 
         try:
