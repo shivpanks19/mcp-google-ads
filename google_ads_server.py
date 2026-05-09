@@ -263,6 +263,13 @@ def get_oauth_credentials():
                 }
 
             logger.info("Starting OAuth authentication flow")
+            if os.environ.get("PORT") or os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("K_SERVICE"):
+                raise ValueError(
+                    "OAuth needs a local browser (InstalledAppFlow); it cannot run on this server. "
+                    "Set GOOGLE_ADS_AUTH_TYPE=service_account and GOOGLE_ADS_CREDENTIALS_JSON to your "
+                    "service account key JSON (one line). Invite that service account in Google Ads: "
+                    "Tools & Settings > Access and security > Users."
+                )
             flow = InstalledAppFlow.from_client_config(client_config, SCOPES)
             creds = flow.run_local_server(port=0)
             logger.info("OAuth flow completed successfully")
