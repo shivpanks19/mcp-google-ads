@@ -374,8 +374,12 @@ def get_headers(creds, include_login_customer_id: bool = False):
 
 
 def make_api_request(url: str, method: str = 'POST', payload: dict = None, creds=None):
-    """Make a Google Ads API request, automatically retrying without login-customer-id on permission errors.
-    
+    """Make a Google Ads API request, automatically retrying without login-customer-id on some errors.
+
+    Retries the same request without ``login-customer-id`` when the first attempt used it and Google
+    returns ``USER_PERMISSION_DENIED``, ``CUSTOMER_NOT_ENABLED``, or ``CUSTOMER_NOT_FOUND`` (Planner
+    calls can fail with the last when the header MCC does not match the URL customer).
+
     Returns:
         (response_json, error_string) — one of which will be None.
     """
@@ -392,15 +396,24 @@ def make_api_request(url: str, method: str = 'POST', payload: dict = None, creds
         if resp.status_code == 200:
             return resp.json(), None
 
-        # On permission errors, retry without login-customer-id
-        if include_login and resp.status_code == 403:
+        # On permission / auth errors, retry without login-customer-id (Planner, etc. can return
+        # CUSTOMER_NOT_FOUND when login-customer-id points at an MCC that does not match the URL customer).
+        if include_login and resp.status_code in (403, 404):
             try:
                 err_code = (resp.json().get('error', {})
                             .get('details', [{}])[0]
                             .get('errors', [{}])[0]
                             .get('errorCode', {}))
-                if 'USER_PERMISSION_DENIED' in err_code.values() or 'CUSTOMER_NOT_ENABLED' in err_code.values():
-                    logger.info("Permission denied with login-customer-id, retrying without it")
+                retry_codes = (
+                    'USER_PERMISSION_DENIED',
+                    'CUSTOMER_NOT_ENABLED',
+                    'CUSTOMER_NOT_FOUND',
+                )
+                if any(v in retry_codes for v in err_code.values()):
+                    logger.info(
+                        "Google Ads error with login-customer-id (%s), retrying without it",
+                        tuple(err_code.values()),
+                    )
                     continue
             except Exception:
                 pass

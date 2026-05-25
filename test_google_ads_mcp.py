@@ -3,12 +3,59 @@ import json
 import os
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 # Add the parent directory to Python path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
 # Import your MCP server module
 import google_ads_server
+
+
+def test_make_api_request_retries_without_login_on_customer_not_found():
+    """Planner-style POSTs retry without login-customer-id when Google returns CUSTOMER_NOT_FOUND."""
+    fail = MagicMock()
+    fail.status_code = 403
+    fail.json.return_value = {
+        "error": {
+            "details": [
+                {
+                    "errors": [
+                        {
+                            "errorCode": {
+                                "authenticationError": "CUSTOMER_NOT_FOUND",
+                            },
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+    ok = MagicMock()
+    ok.status_code = 200
+    ok.json.return_value = {"results": []}
+
+    headers = {
+        "Authorization": "Bearer x",
+        "developer-token": "d",
+        "content-type": "application/json",
+    }
+    with patch.dict(
+        os.environ,
+        {"GOOGLE_ADS_DEVELOPER_TOKEN": "d", "GOOGLE_ADS_LOGIN_CUSTOMER_ID": "1111111111"},
+        clear=False,
+    ):
+        with patch("google_ads_server.get_headers", return_value=headers):
+            with patch("google_ads_server.requests.post", side_effect=[fail, ok]) as mock_post:
+                data, err = google_ads_server.make_api_request(
+                    "https://googleads.googleapis.com/v24/customers/6491446793:generateKeywordIdeas",
+                    method="POST",
+                    payload={"keywordSeed": {"keywords": ["a"]}},
+                    creds=MagicMock(),
+                )
+    assert err is None
+    assert data == {"results": []}
+    assert mock_post.call_count == 2
 
 def test_format_customer_id():
     """Test the format_customer_id function with various input formats."""
@@ -38,8 +85,8 @@ def test_format_customer_id():
         print(f"Test {'PASSED' if result == expected else 'FAILED'}")
         print("-" * 50)
 
-async def test_mcp_tools():
-    """Test Google Ads MCP tools directly."""
+async def mcp_tools_live():
+    """Run Google Ads MCP tools against the live API (invoke from __main__, not pytest)."""
     # Get a list of available customer IDs first
     print("=== Testing list_accounts ===")
     accounts_result = await google_ads_server.list_accounts()
@@ -86,7 +133,7 @@ async def test_mcp_tools():
     gaql_result = await google_ads_server.run_gaql(customer_id, query, format="json")
     print(gaql_result)
 
-async def test_asset_methods():
+async def asset_methods_live():
     """Test Asset-related MCP tools directly."""
     # Get a list of available customer IDs first
     print("=== Testing Asset Methods ===")
@@ -142,7 +189,7 @@ async def test_asset_methods():
         print(f"Error in analyze_image_assets: {str(e)}")
 
 
-async def test_keyword_plan_tools_live():
+async def keyword_plan_tools_live():
     """Live Keyword Planner tools (requires credentials + RUN_LIVE_GOOGLE_ADS_TESTS=1)."""
     print("=== Testing Keyword Planner tools (live) ===")
     accounts_result = await google_ads_server.list_accounts()
@@ -203,12 +250,12 @@ if __name__ == "__main__":
         os.environ["GOOGLE_ADS_CLIENT_SECRET"] = "YOUR_CLIENT_SECRET"  # Replace with placeholder
     
     # Run the MCP tools test (uncomment to run full tests)
-    # asyncio.run(test_mcp_tools())
+    # asyncio.run(mcp_tools_live())
 
     # Live Keyword Planner integration (set RUN_LIVE_GOOGLE_ADS_TESTS=1)
     if os.environ.get("RUN_LIVE_GOOGLE_ADS_TESTS") == "1":
-        asyncio.run(test_keyword_plan_tools_live())
+        asyncio.run(keyword_plan_tools_live())
     else:
         # Run the asset methods test (uncomment to run full tests)
         pass
-    # asyncio.run(test_asset_methods())
+    # asyncio.run(asset_methods_live())
