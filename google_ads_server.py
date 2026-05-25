@@ -1896,6 +1896,8 @@ async def list_resources(
 import memory_tools  # noqa: E402, F401
 import analysis_tools  # noqa: E402, F401
 import keyword_plan_tools  # noqa: E402, F401
+import campaign_edit_tools  # noqa: E402, F401
+import optimization_actions  # noqa: E402, F401
 
 if __name__ == "__main__":
     # Start the MCP server on stdio transport

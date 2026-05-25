@@ -8,7 +8,7 @@ Host the Google Ads MCP server as a **Web Service** with **streamable HTTP** so 
 2. This repo pushed to GitHub (`shivpanks19/mcp-google-ads`)
 3. **Google Ads service account** JSON (OAuth with browser does **not** work on Render)
 4. Google Ads **developer token** (Basic/Standard for Keyword Planner)
-5. Service account email invited in Google Ads: **Tools & settings → Access and security → Users**
+5. Service account email invited in Google Ads: **Tools & settings → Access and security → Users** with **Standard** (edit) access if you use campaign mutate tools on Render
 
 ---
 
@@ -119,6 +119,7 @@ Exact JSON shape depends on your Cursor version; use the deployed **`/mcp`** URL
 - Never commit `.env`, `credentials.json`, or service account keys to Git.
 - Use Render **Secret** type for tokens and JSON keys.
 - Restrict who can use the Render URL; it can call Google Ads with your service account permissions.
+- **Campaign edit tools** (`update_campaign_status`, `apply_weekly_performance_actions`, etc.) work on Render the same as locally, but only if the service account has **edit** access on the target accounts. Read-only invites will fail mutate calls with permission errors.
 
 ---
 

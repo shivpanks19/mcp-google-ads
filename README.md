@@ -33,6 +33,7 @@ A tool that connects [Google Ads](https://ads.google.com/) with Claude AI, allow
    - Analyze bid strategies and performance
    - Identify opportunities for optimization
    - Get recommendations for budget allocation
+   - **Campaign edits (direct apply)** — pause/enable campaigns, adjust budgets and bidding, add negatives, and run weekly optimization via `update_campaign_status`, `update_campaign_budget`, `apply_weekly_performance_actions`, and related tools (requires edit access; see [`docs/campaign-edit-examples.md`](docs/campaign-edit-examples.md))
 
 ---
 
@@ -108,6 +109,18 @@ Here's what you can ask Claude to do once you've set up this integration:
 | `get_campaign_performance`      | Shows campaign metrics with performance data; optional Supabase snapshot (`persist_snapshot` or `AUTO_PERSIST_CAMPAIGN_PERFORMANCE_SNAPSHOTS`) | Your account ID and time period                                 |
 | `get_ad_performance`            | Detailed analysis of your ad creative performance           | Your account ID and time period                                 |
 | `run_gaql`                      | Runs any arbitrary GAQL query with formatting options       | Your account ID, query, and format (table, JSON, or CSV)        |
+
+### Campaign edits (write API)
+
+Mutations apply **immediately** in Google Ads. Credentials need **edit** access. Full tool list and **Analyze → Apply** workflow: [`docs/mcp-tools-and-reports.md`](docs/mcp-tools-and-reports.md). CLI examples: [`docs/campaign-edit-examples.md`](docs/campaign-edit-examples.md).
+
+| **What You Can Ask For** | **What It Does** |
+|--------------------------|------------------|
+| `get_campaign_settings` | Read status, budget, bidding before changing a campaign |
+| `update_campaign_status` | Pause or enable a campaign |
+| `update_campaign_budget` | Set daily budget (account currency) |
+| `add_negative_keywords` | Add campaign or ad group negatives |
+| `apply_weekly_performance_actions` | Classify performance and apply pause/budget/negative actions in one call |
 
 ### Supabase AI memory and reporting (optional)
 

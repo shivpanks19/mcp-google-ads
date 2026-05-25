@@ -28,6 +28,59 @@ This document describes what the **Google Ads MCP** exposes: there is no separat
 | `get_keyword_metrics` | **Keyword Planner:** historical metrics for an explicit keyword list (search volume, competition, bids). |
 | `suggest_geo_targets` | Resolve location names (e.g. India, Mumbai) to `geoTargetConstants/…` resource names. |
 
+## Campaign edit tools (write / mutate API)
+
+These tools **apply changes immediately** in Google Ads (no dry-run gate). Credentials need **edit** access (Standard user on the account, or service account invited with edit). Search campaigns are the primary target; PMax / Demand Gen bidding updates may return clear errors for unsupported fields.
+
+Registered from `campaign_edit_tools.py` and `optimization_actions.py` (imported by `google_ads_server.py`).
+
+### Read-before-write
+
+| Tool | Purpose |
+|------|---------|
+| `get_campaign_settings` | Campaign name, status, budget, bidding strategy, target CPA/ROAS; resolve by `campaign_id` or fuzzy `campaign_name`. |
+| `list_campaign_budgets` | Budget resource IDs and amounts (for reallocation / shared-budget checks). |
+
+### Campaign-level edits
+
+| Tool | Purpose |
+|------|---------|
+| `update_campaign_status` | Enable or pause a campaign (`ENABLED` \| `PAUSED`). |
+| `update_campaign_budget` | Set daily budget (INR float → account currency micros). Warns if budget is shared across campaigns. |
+| `update_campaign_bidding` | Change bidding strategy (`MAXIMIZE_CONVERSIONS`, `TARGET_CPA`, `TARGET_ROAS`, `MANUAL_CPC`, etc.) with optional targets. |
+| `rename_campaign` | Rename a campaign. |
+
+### Ad group & negatives
+
+| Tool | Purpose |
+|------|---------|
+| `update_ad_group_status` | Enable or pause an ad group (by id or name + optional `campaign_id`). |
+| `add_negative_keywords` | Add campaign- or ad-group-level negatives; dedupes existing criteria. |
+| `add_campaign_negative_keywords_from_search_terms` | Pull waste queries from `search_term_view` and add as campaign negatives. |
+
+### Bulk & orchestration
+
+| Tool | Purpose |
+|------|---------|
+| `bulk_update_campaigns` | Batch status / budget / target CPA updates for multiple campaigns. |
+| `apply_weekly_performance_actions` | **Flagship PM workflow:** classify campaigns (pause waste, reduce/increase budget, optional search-term negatives) and **apply directly**; optional Supabase `save_memory` audit when configured. |
+| `analyze_and_apply_campaign_edits` | Apply an explicit action list after human/agent review of analysis output. |
+
+Copy-paste CLI examples: [`campaign-edit-examples.md`](campaign-edit-examples.md).
+
+## Recommended “Analyze → Apply” workflow
+
+1. `list_accounts` → pick `customer_id`.
+2. `get_campaign_performance(customer_id, days=7)` — baseline metrics.
+3. `analyze_running_campaigns_and_ads(customer_id, campaign_days=7, ad_days=7)` — Markdown brief with heuristic next steps.
+4. **`get_campaign_settings`** on campaigns you plan to change (confirm budget, bidding, shared budget).
+5. Either:
+   - **`apply_weekly_performance_actions`** with thresholds (`min_spend_inr`, `pause_zero_conversion_spenders`, etc.), or
+   - Surgical edits: **`update_campaign_status`**, **`update_campaign_budget`**, **`add_negative_keywords`**, **`add_campaign_negative_keywords_from_search_terms`**.
+6. Optional: **`save_analysis_text_snapshot`** (narrative) and rely on auto **`save_memory`** from weekly apply when Supabase is configured.
+
+**Important:** Mutations are live. Test on a non-production account or use conservative thresholds first.
+
 ## Recommended “give me a report” workflow
 
 1. `list_accounts` → pick `customer_id`.
@@ -92,6 +145,7 @@ When the server loads, **`analysis_tools.py`** registers tools that **combine** 
 
 - Tool definitions: `google_ads_server.py`
 - Keyword Planner: `keyword_plan_tools.py` (imported from `google_ads_server.py`)
+- Campaign edits / mutations: `campaign_edit_tools.py`, `optimization_actions.py`, `mutate_helpers.py`
 - Memory / snapshots: `memory_tools.py`, `supabase_store.py`
 - Cross-source analysis: `analysis_tools.py` (imported from `google_ads_server.py` so tools register on the same MCP instance)
 
