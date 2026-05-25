@@ -1,12 +1,35 @@
 """
-HTTP MCP entrypoint for PaaS (e.g. Railway / Railpack).
+HTTP MCP entrypoint for PaaS (Render, Railway, etc.).
 
-Railpack expects main.py or app.py when no framework is detected.
-Uses streamable-http so Cursor can POST to /mcp (Cursor remote MCP).
-Listen host/port are set in google_ads_server (from PORT on Railway).
-Local stdio usage: run `python google_ads_server.py` instead.
+Uses streamable-http so clients can POST to /mcp (Cursor remote MCP).
+Listen host/port come from google_ads_server (PORT env on Render → 0.0.0.0).
+
+Local stdio: python google_ads_server.py
+Local HTTP:   python main.py  → http://127.0.0.1:8000/mcp
 """
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
 from google_ads_server import mcp  # noqa: E402
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request: Request) -> JSONResponse:
+    """Render / load-balancer health check (no auth)."""
+    return JSONResponse({"status": "ok", "service": "mcp-google-ads"})
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def root(_request: Request) -> JSONResponse:
+    return JSONResponse(
+        {
+            "service": "mcp-google-ads",
+            "mcp_endpoint": "/mcp",
+            "health": "/health",
+            "docs": "https://github.com/shivpanks19/mcp-google-ads",
+        }
+    )
+
 
 if __name__ == "__main__":
     mcp.run(transport="streamable-http")

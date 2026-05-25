@@ -131,7 +131,11 @@ When `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set, the agent can **exp
 
 1. Create a project at [supabase.com](https://supabase.com).
 2. In the SQL Editor, run [`supabase/migrations/001_initial.sql`](supabase/migrations/001_initial.sql), then [`supabase/migrations/002_analysis_text_snapshots.sql`](supabase/migrations/002_analysis_text_snapshots.sql) if you use narrative analysis tools.
-3. Copy **Project URL** and **service_role** key (Settings → API) into `.env` or Railway variables (see [`.env.example`](.env.example)).
+3. Copy **Project URL** and **service_role** key (Settings → API) into `.env` or Render/Railway variables (see [`.env.example`](.env.example)).
+
+### Deploy on Render (remote MCP)
+
+See **[docs/render-deploy.md](docs/render-deploy.md)** for Web Service settings, env vars, and Cursor URL (`https://YOUR-SERVICE.onrender.com/mcp`).
 
 **Typical agent workflow:** `list_accounts` → `save_client_context` with aliases → analyze with GAQL → `save_memory` / `save_report_snapshot` / `save_analysis_text_snapshot` → next session: `recall_client_context` + `list_report_snapshots` / `list_analysis_text_snapshots`.
 
