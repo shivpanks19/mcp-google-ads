@@ -139,6 +139,55 @@ async def test_asset_methods():
     except Exception as e:
         print(f"Error in analyze_image_assets: {str(e)}")
 
+        print(f"Error in analyze_image_assets: {str(e)}")
+
+
+async def test_keyword_plan_tools_live():
+    """Live Keyword Planner tools (requires credentials + RUN_LIVE_GOOGLE_ADS_TESTS=1)."""
+    print("=== Testing Keyword Planner tools (live) ===")
+    accounts_result = await google_ads_server.list_accounts()
+    print(accounts_result)
+
+    customer_id = None
+    for line in accounts_result.split("\n"):
+        if line.startswith("Account ID:"):
+            customer_id = line.replace("Account ID:", "").strip()
+            break
+
+    if not customer_id:
+        print("No customer IDs found. Skipping keyword plan live tests.")
+        return
+
+    import keyword_plan_tools
+
+    print("\n=== suggest_geo_targets (India, Mumbai) ===")
+    geo_result = await keyword_plan_tools.suggest_geo_targets(
+        customer_id,
+        location_names=["India", "Mumbai"],
+        country_code="IN",
+    )
+    print(geo_result)
+
+    print("\n=== generate_keyword_ideas ===")
+    ideas_result = await keyword_plan_tools.generate_keyword_ideas(
+        customer_id,
+        seed_keywords=["microsoft teams room", "yealink mvc kit"],
+        geo_targets=["India"],
+        language="English",
+        limit=10,
+    )
+    print(ideas_result)
+
+    print("\n=== get_keyword_metrics ===")
+    metrics_result = await keyword_plan_tools.get_keyword_metrics(
+        customer_id,
+        keywords=["microsoft teams room", "yealink mvc kit"],
+        geo_targets=["India"],
+        language="English",
+    )
+    print(metrics_result)
+
+
 if __name__ == "__main__":
     # Run format_customer_id tests first
     # test_format_customer_id()
@@ -155,6 +204,11 @@ if __name__ == "__main__":
     
     # Run the MCP tools test (uncomment to run full tests)
     # asyncio.run(test_mcp_tools())
-    
-    # Run the asset methods test (uncomment to run full tests)
-    asyncio.run(test_asset_methods())
+
+    # Live Keyword Planner integration (set RUN_LIVE_GOOGLE_ADS_TESTS=1)
+    if os.environ.get("RUN_LIVE_GOOGLE_ADS_TESTS") == "1":
+        asyncio.run(test_keyword_plan_tools_live())
+    else:
+        # Run the asset methods test (uncomment to run full tests)
+        pass
+    # asyncio.run(test_asset_methods())

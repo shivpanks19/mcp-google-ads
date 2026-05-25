@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 from pydantic import Field
 import os
 import json
@@ -19,6 +19,15 @@ from mcp.server.fastmcp import FastMCP
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('google_ads_server')
+
+# In-process cache so repeated get_credentials() (e.g. CLI warmup + GAQL) does not re-log / re-read files.
+_credentials_cache: Optional[Any] = None
+
+
+def reset_credentials_cache() -> None:
+    """Clear cached credentials (for tests or after switching auth env in the same process)."""
+    global _credentials_cache
+    _credentials_cache = None
 
 
 def _fastmcp_listen_host_port() -> tuple[str, int]:
@@ -55,6 +64,17 @@ mcp = FastMCP(
 # Constants and configuration
 SCOPES = ['https://www.googleapis.com/auth/adwords']
 API_VERSION = "v24"  # Google Ads API version
+
+
+def _google_ads_http_timeout_seconds() -> float:
+    """Seconds for ``requests`` calls to the Google Ads API (GAQL search, etc.)."""
+    raw = os.environ.get("GOOGLE_ADS_REQUEST_TIMEOUT", "120").strip()
+    try:
+        t = float(raw)
+        return t if t > 0 else 120.0
+    except ValueError:
+        return 120.0
+
 
 # Load environment variables
 try:
@@ -123,7 +143,20 @@ def get_credentials():
 
     Returns:
         Valid credentials object to use with Google Ads API
+    
+    Results are cached in-process while OAuth tokens remain valid (or for the lifetime of a
+    loaded service account object) to avoid duplicate log noise on back-to-back calls.
     """
+    global _credentials_cache
+
+    if _credentials_cache is not None:
+        c = _credentials_cache
+        if isinstance(c, service_account.Credentials):
+            return c
+        if getattr(c, "valid", False):
+            return c
+        _credentials_cache = None
+
     if not (GOOGLE_ADS_CREDENTIALS_PATH and str(GOOGLE_ADS_CREDENTIALS_PATH).strip()) and _load_credentials_dict_from_env() is None:
         raise ValueError(
             "Set GOOGLE_ADS_CREDENTIALS_JSON or GOOGLE_ADS_CREDENTIALS_PATH to load Google Ads credentials"
@@ -135,13 +168,17 @@ def get_credentials():
     # Service Account authentication
     if auth_type == "service_account":
         try:
-            return get_service_account_credentials()
+            creds = get_service_account_credentials()
+            _credentials_cache = creds
+            return creds
         except Exception as e:
             logger.error(f"Error with service account authentication: {str(e)}")
             raise
     
     # OAuth 2.0 authentication (default)
-    return get_oauth_credentials()
+    creds = get_oauth_credentials()
+    _credentials_cache = creds
+    return creds
 
 def get_service_account_credentials():
     """Get credentials using a service account key from env JSON or key file."""
@@ -409,6 +446,280 @@ async def list_accounts() -> str:
     except Exception as e:
         return f"Error listing accounts: {str(e)}"
 
+
+def _gaql_search_raw(
+    formatted_customer_id: str, query: str
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """
+    POST googleAds:search for the given customer.
+
+    Returns (rows, None) on HTTP 200 (rows may be empty). Returns (None, err) on failure.
+    """
+    try:
+        creds = get_credentials()
+        headers = get_headers(creds)
+        url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:search"
+        response = requests.post(
+            url,
+            headers=headers,
+            json={"query": query},
+            timeout=_google_ads_http_timeout_seconds(),
+        )
+        if response.status_code != 200:
+            return None, f"Error executing query: {response.text}"
+        body = response.json()
+        rows = body.get("results") or []
+        return rows, None
+    except Exception as e:
+        return None, f"Error executing GAQL query: {str(e)}"
+
+
+def _format_execute_gaql_table(formatted_customer_id: str, rows: List[Dict[str, Any]]) -> str:
+    """Same pipe-delimited layout as the historical execute_gaql_query table output."""
+    result_lines = [f"Query Results for Account {formatted_customer_id}:"]
+    result_lines.append("-" * 80)
+    fields: List[str] = []
+    first_result = rows[0]
+    for key in first_result:
+        if isinstance(first_result[key], dict):
+            for subkey in first_result[key]:
+                fields.append(f"{key}.{subkey}")
+        else:
+            fields.append(key)
+    result_lines.append(" | ".join(fields))
+    result_lines.append("-" * 80)
+    for result in rows:
+        row_data = []
+        for field in fields:
+            if "." in field:
+                parent, child = field.split(".", 1)
+                value = str(result.get(parent, {}).get(child, ""))
+            else:
+                value = str(result.get(field, ""))
+            row_data.append(value)
+        result_lines.append(" | ".join(row_data))
+    return "\n".join(result_lines)
+
+
+def campaign_performance_gaql(days: int) -> str:
+    """GAQL for top campaigns by cost over LAST_N_DAYS (same as get_campaign_performance)."""
+    return f"""
+        SELECT
+            campaign.id,
+            campaign.name,
+            campaign.status,
+            metrics.impressions,
+            metrics.clicks,
+            metrics.cost_micros,
+            metrics.conversions,
+            metrics.average_cpc
+        FROM campaign
+        WHERE segments.date DURING LAST_{days}_DAYS
+        ORDER BY metrics.cost_micros DESC
+        LIMIT 50
+    """
+
+
+def _should_persist_campaign_performance_snapshot(persist_snapshot: bool) -> bool:
+    """True if caller asked to persist or AUTO_PERSIST_CAMPAIGN_PERFORMANCE_SNAPSHOTS is set."""
+    if persist_snapshot:
+        return True
+    v = os.environ.get("AUTO_PERSIST_CAMPAIGN_PERFORMANCE_SNAPSHOTS", "").strip().lower()
+    return v in ("1", "true", "yes")
+
+
+async def fetch_campaign_performance_table_and_rows(
+    customer_id: str, days: int
+) -> Dict[str, Any]:
+    """
+    Run the same GAQL as ``get_campaign_performance``; return table text and raw API rows.
+
+    Keys: ``ok`` (bool), ``error`` (str if not ok), ``table`` (str), ``rows`` (list),
+    ``formatted_customer_id`` (str).
+    """
+    formatted_customer_id = format_customer_id(customer_id)
+    query = campaign_performance_gaql(days)
+    rows, err = _gaql_search_raw(formatted_customer_id, query)
+    if err:
+        return {
+            "ok": False,
+            "error": err,
+            "table": None,
+            "rows": [],
+            "formatted_customer_id": formatted_customer_id,
+        }
+    if not rows:
+        return {
+            "ok": True,
+            "table": "No results found for the query.",
+            "rows": [],
+            "formatted_customer_id": formatted_customer_id,
+        }
+    return {
+        "ok": True,
+        "table": _format_execute_gaql_table(formatted_customer_id, rows),
+        "rows": rows,
+        "formatted_customer_id": formatted_customer_id,
+    }
+
+
+def ad_performance_gaql(days: int) -> str:
+    """GAQL for top ads by impressions over LAST_N_DAYS (same as get_ad_performance)."""
+    return f"""
+        SELECT
+            ad_group_ad.ad.id,
+            ad_group_ad.ad.name,
+            ad_group_ad.status,
+            campaign.name,
+            ad_group.name,
+            metrics.impressions,
+            metrics.clicks,
+            metrics.cost_micros,
+            metrics.conversions
+        FROM ad_group_ad
+        WHERE segments.date DURING LAST_{days}_DAYS
+        ORDER BY metrics.impressions DESC
+        LIMIT 50
+    """
+
+
+async def fetch_ad_performance_table_and_rows(
+    customer_id: str, days: int
+) -> Dict[str, Any]:
+    """Same shape as ``fetch_campaign_performance_table_and_rows`` for ad-level rows."""
+    formatted_customer_id = format_customer_id(customer_id)
+    query = ad_performance_gaql(days)
+    rows, err = _gaql_search_raw(formatted_customer_id, query)
+    if err:
+        return {
+            "ok": False,
+            "error": err,
+            "table": None,
+            "rows": [],
+            "formatted_customer_id": formatted_customer_id,
+        }
+    if not rows:
+        return {
+            "ok": True,
+            "table": "No results found for the query.",
+            "rows": [],
+            "formatted_customer_id": formatted_customer_id,
+        }
+    return {
+        "ok": True,
+        "table": _format_execute_gaql_table(formatted_customer_id, rows),
+        "rows": rows,
+        "formatted_customer_id": formatted_customer_id,
+    }
+
+
+def ad_copy_asset_performance_gaql(days: int) -> str:
+    """GAQL for RSA text assets with performance labels and metrics (top 200 by impressions)."""
+    return f"""
+        SELECT
+            campaign.name,
+            ad_group.name,
+            ad_group_ad.ad.id,
+            asset.id,
+            asset.text_asset.text,
+            ad_group_ad_asset_view.field_type,
+            ad_group_ad_asset_view.performance_label,
+            metrics.impressions,
+            metrics.clicks,
+            metrics.conversions,
+            metrics.cost_micros,
+            metrics.ctr
+        FROM ad_group_ad_asset_view
+        WHERE segments.date DURING LAST_{days}_DAYS
+            AND ad_group_ad_asset_view.field_type IN ('HEADLINE', 'DESCRIPTION')
+            AND metrics.impressions > 0
+        ORDER BY metrics.impressions DESC
+        LIMIT 200
+    """
+
+
+def ad_copy_asset_performance_fallback_gaql(days: int) -> str:
+    """Fallback when ad_group_ad_asset_view has no rows (account / API shape)."""
+    return f"""
+        SELECT
+            campaign.name,
+            ad_group.name,
+            asset.id,
+            asset.type,
+            asset.text_asset.text,
+            asset_performance_label,
+            metrics.impressions,
+            metrics.clicks,
+            metrics.conversions,
+            metrics.cost_micros,
+            metrics.ctr
+        FROM asset_performance_label_view
+        WHERE asset.type = 'TEXT'
+            AND segments.date DURING LAST_{days}_DAYS
+            AND metrics.impressions > 0
+        ORDER BY metrics.impressions DESC
+        LIMIT 200
+    """
+
+
+async def fetch_ad_copy_asset_performance_rows(
+    customer_id: str, days: int
+) -> Dict[str, Any]:
+    """
+    Text RSA assets with performance labels and metrics.
+
+    Tries ``ad_group_ad_asset_view`` first (headline vs description), then
+    ``asset_performance_label_view``. Same return shape as other ``fetch_*`` helpers.
+    """
+    formatted_customer_id = format_customer_id(customer_id)
+    primary_query = ad_copy_asset_performance_gaql(days)
+    rows, err = _gaql_search_raw(formatted_customer_id, primary_query)
+    if err:
+        return {
+            "ok": False,
+            "error": err,
+            "table": None,
+            "rows": [],
+            "formatted_customer_id": formatted_customer_id,
+            "source": "ad_group_ad_asset_view",
+        }
+    if rows:
+        return {
+            "ok": True,
+            "table": _format_execute_gaql_table(formatted_customer_id, rows),
+            "rows": rows,
+            "formatted_customer_id": formatted_customer_id,
+            "source": "ad_group_ad_asset_view",
+        }
+
+    fallback_query = ad_copy_asset_performance_fallback_gaql(days)
+    rows2, err2 = _gaql_search_raw(formatted_customer_id, fallback_query)
+    if err2:
+        return {
+            "ok": False,
+            "error": err2,
+            "table": None,
+            "rows": [],
+            "formatted_customer_id": formatted_customer_id,
+            "source": "asset_performance_label_view",
+        }
+    if not rows2:
+        return {
+            "ok": True,
+            "table": "No text asset performance rows for this period.",
+            "rows": [],
+            "formatted_customer_id": formatted_customer_id,
+            "source": "none",
+        }
+    return {
+        "ok": True,
+        "table": _format_execute_gaql_table(formatted_customer_id, rows2),
+        "rows": rows2,
+        "formatted_customer_id": formatted_customer_id,
+        "source": "asset_performance_label_view",
+    }
+
+
 @mcp.tool()
 async def execute_gaql_query(
     customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes). Example: '9873186703'"),
@@ -430,62 +741,25 @@ async def execute_gaql_query(
         customer_id: "1234567890"
         query: "SELECT campaign.id, campaign.name FROM campaign LIMIT 10"
     """
-    try:
-        creds = get_credentials()
-        headers = get_headers(creds)
-        
-        formatted_customer_id = format_customer_id(customer_id)
-        url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:search"
-        
-        payload = {"query": query}
-        response = requests.post(url, headers=headers, json=payload)
-        
-        if response.status_code != 200:
-            return f"Error executing query: {response.text}"
-        
-        results = response.json()
-        if not results.get('results'):
-            return "No results found for the query."
-        
-        # Format the results as a table
-        result_lines = [f"Query Results for Account {formatted_customer_id}:"]
-        result_lines.append("-" * 80)
-        
-        # Get field names from the first result
-        fields = []
-        first_result = results['results'][0]
-        for key in first_result:
-            if isinstance(first_result[key], dict):
-                for subkey in first_result[key]:
-                    fields.append(f"{key}.{subkey}")
-            else:
-                fields.append(key)
-        
-        # Add header
-        result_lines.append(" | ".join(fields))
-        result_lines.append("-" * 80)
-        
-        # Add data rows
-        for result in results['results']:
-            row_data = []
-            for field in fields:
-                if "." in field:
-                    parent, child = field.split(".")
-                    value = str(result.get(parent, {}).get(child, ""))
-                else:
-                    value = str(result.get(field, ""))
-                row_data.append(value)
-            result_lines.append(" | ".join(row_data))
-        
-        return "\n".join(result_lines)
-    
-    except Exception as e:
-        return f"Error executing GAQL query: {str(e)}"
+    formatted_customer_id = format_customer_id(customer_id)
+    rows, err = _gaql_search_raw(formatted_customer_id, query)
+    if err:
+        return err
+    if not rows:
+        return "No results found for the query."
+    return _format_execute_gaql_table(formatted_customer_id, rows)
 
 @mcp.tool()
 async def get_campaign_performance(
     customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes). Example: '9873186703'"),
-    days: int = Field(default=30, description="Number of days to look back (7, 30, 90, etc.)")
+    days: int = Field(default=30, description="Number of days to look back (7, 30, 90, etc.)"),
+    persist_snapshot: bool = Field(
+        default=False,
+        description=(
+            "When True, save this fetch to Supabase report_snapshots (requires SUPABASE_*). "
+            "Or set env AUTO_PERSIST_CAMPAIGN_PERFORMANCE_SNAPSHOTS=1 to persist without passing True each time."
+        ),
+    ),
 ) -> str:
     """
     Get campaign performance metrics for the specified time period.
@@ -498,6 +772,7 @@ async def get_campaign_performance(
     Args:
         customer_id: The Google Ads customer ID as a string (10 digits, no dashes)
         days: Number of days to look back (default: 30)
+        persist_snapshot: Save a snapshot to Supabase when configured (weekly/monthly style: use days=7 or 30).
         
     Returns:
         Formatted table of campaign performance data
@@ -510,23 +785,40 @@ async def get_campaign_performance(
         customer_id: "1234567890"
         days: 14
     """
-    query = f"""
-        SELECT
-            campaign.id,
-            campaign.name,
-            campaign.status,
-            metrics.impressions,
-            metrics.clicks,
-            metrics.cost_micros,
-            metrics.conversions,
-            metrics.average_cpc
-        FROM campaign
-        WHERE segments.date DURING LAST_{days}_DAYS
-        ORDER BY metrics.cost_micros DESC
-        LIMIT 50
-    """
-    
-    return await execute_gaql_query(customer_id, query)
+    data = await fetch_campaign_performance_table_and_rows(customer_id, days)
+    if not data["ok"]:
+        return str(data["error"])
+    table = data["table"]
+    rows: List[Dict[str, Any]] = data["rows"]
+    formatted_customer_id: str = data["formatted_customer_id"]
+
+    if not rows:
+        return table if table is not None else "No results found for the query."
+
+    if _should_persist_campaign_performance_snapshot(persist_snapshot):
+        try:
+            import supabase_store as store
+
+            if store.is_configured():
+                snap_out = store.persist_campaign_performance_snapshot(
+                    customer_id=formatted_customer_id,
+                    days=days,
+                    api_results=rows,
+                    summary=None,
+                )
+                return (
+                    table
+                    + "\n\n---\nSupabase snapshot: "
+                    + json.dumps(snap_out, default=str)
+                )
+        except Exception as e:
+            return (
+                table
+                + "\n\n---\nSupabase snapshot (error): "
+                + json.dumps({"error": str(e)}, default=str)
+            )
+
+    return table
 
 @mcp.tool()
 async def get_ad_performance(
@@ -1598,6 +1890,12 @@ async def list_resources(
     
     # Use your existing run_gaql function to execute this query
     return await run_gaql(customer_id, query)
+
+
+# Register Supabase memory / reporting tools (optional; requires SUPABASE_* env vars)
+import memory_tools  # noqa: E402, F401
+import analysis_tools  # noqa: E402, F401
+import keyword_plan_tools  # noqa: E402, F401
 
 if __name__ == "__main__":
     # Start the MCP server on stdio transport

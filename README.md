@@ -21,11 +21,12 @@ A tool that connects [Google Ads](https://ads.google.com/) with Claude AI, allow
    - Compare different time periods to spot changes
    - **Visualize your data** with charts and graphs created by Claude
 
-3. **Keyword & Ad Performance**  
+3. **Keyword & Ad Performance**
    - Identify top and underperforming keywords
-   - Analyze ad copy effectiveness 
+   - Analyze ad copy effectiveness
    - Check quality scores and competitive metrics
    - Get actionable insights on how to improve your campaigns
+   - **Keyword Planner research** — discover keyword ideas, search volumes, competition, and CPC ranges via `generate_keyword_ideas`, `get_keyword_metrics`, and `suggest_geo_targets` (pre-campaign research without GAQL or manual exports)
 
 4. **Budget & Bid Management**  
    - Monitor campaign budgets and spending
@@ -96,15 +97,43 @@ flowchart TB
 
 ## Available Tools
 
+For a fuller guide (report-style tools vs custom GAQL vs optional Supabase snapshots), see **[`docs/mcp-tools-and-reports.md`](docs/mcp-tools-and-reports.md)**.
+
 Here's what you can ask Claude to do once you've set up this integration:
 
 | **What You Can Ask For**        | **What It Does**                                            | **What You'll Need to Provide**                                 |
 |---------------------------------|-------------------------------------------------------------|----------------------------------------------------------------|
 | `list_accounts`                 | Shows all your Google Ads accounts                          | Nothing - just ask!                                             |
 | `execute_gaql_query`            | Runs a Google Ads Query Language query                      | Your account ID and a GAQL query                               |
-| `get_campaign_performance`      | Shows campaign metrics with performance data                | Your account ID and time period                                 |
+| `get_campaign_performance`      | Shows campaign metrics with performance data; optional Supabase snapshot (`persist_snapshot` or `AUTO_PERSIST_CAMPAIGN_PERFORMANCE_SNAPSHOTS`) | Your account ID and time period                                 |
 | `get_ad_performance`            | Detailed analysis of your ad creative performance           | Your account ID and time period                                 |
 | `run_gaql`                      | Runs any arbitrary GAQL query with formatting options       | Your account ID, query, and format (table, JSON, or CSV)        |
+
+### Supabase AI memory and reporting (optional)
+
+When `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set, the agent can **explicitly** persist and recall context (Google Ads tools are unchanged and never auto-write to the database).
+
+| **Tool** | **What It Does** |
+|----------|------------------|
+| `save_client_context` | Upsert account profile: name, aliases, notes, metadata |
+| `recall_client_context` | Load profile + recent memory by `customer_id` or name/alias search |
+| `save_memory` | Store an insight, decision, audit note, or context entry |
+| `search_memory` | Filter memory by client, type, tags, keyword, or date range |
+| `save_report_snapshot` | Save normalized metrics + summary for a reporting period |
+| `save_analysis_text_snapshot` | Save a full-text analysis (e.g. campaign vs 7d/30d) with type + timestamp in Supabase |
+| `list_analysis_text_snapshots` | List saved narrative analyses for a client |
+| `list_report_snapshots` | List past snapshots for period-over-period comparison |
+| `sync_list_accounts_to_supabase` | Run `list_accounts`, then upsert each customer ID into `google_ads_clients` (seeds rows for memory/snapshots) |
+| `get_account_analysis_context` | JSON: recent `analysis_text_snapshots` + `report_snapshots` from Supabase (no Ads API call) |
+| `analyze_running_campaigns_and_ads` | Markdown brief: optional Supabase context + live top campaigns/ads from the API + heuristic next steps |
+
+**One-time Supabase setup:**
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. In the SQL Editor, run [`supabase/migrations/001_initial.sql`](supabase/migrations/001_initial.sql), then [`supabase/migrations/002_analysis_text_snapshots.sql`](supabase/migrations/002_analysis_text_snapshots.sql) if you use narrative analysis tools.
+3. Copy **Project URL** and **service_role** key (Settings → API) into `.env` or Railway variables (see [`.env.example`](.env.example)).
+
+**Typical agent workflow:** `list_accounts` → `save_client_context` with aliases → analyze with GAQL → `save_memory` / `save_report_snapshot` / `save_analysis_text_snapshot` → next session: `recall_client_context` + `list_report_snapshots` / `list_analysis_text_snapshots`.
 
 ### Using the Advanced Query Tools
 
@@ -182,6 +211,9 @@ Better for automated systems or managing multiple accounts:
 The application now includes robust token refresh handling:
 
 - **OAuth 2.0 Tokens**: The tool will automatically refresh expired OAuth tokens when possible, or prompt for re-authentication if the refresh token is invalid.
+- **Re-run the browser login locally** (desktop only): from the repo root, run  
+  `.venv/bin/python scripts/run_oauth_login.py`  
+  Use `--force` to drop a detected user token file first so Google asks you to sign in again.
 - **Service Account Tokens**: Service account tokens are automatically generated and refreshed as needed without user intervention.
 
 #### Authentication Method Comparison

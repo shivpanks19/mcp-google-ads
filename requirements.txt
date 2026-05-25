@@ -12,6 +12,9 @@ requests>=2.31.0
 # Environment configuration
 python-dotenv>=1.0.0
 
+# Supabase (AI memory and report snapshots)
+supabase>=2.0.0
+
 # Optional visualization dependencies
 matplotlib>=3.7.3
 pandas>=2.1.4
