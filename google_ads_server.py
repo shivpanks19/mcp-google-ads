@@ -474,6 +474,62 @@ def _gaql_search_raw(
         return None, f"Error executing GAQL query: {str(e)}"
 
 
+def _mutations_disabled_by_env() -> bool:
+    v = os.environ.get("GOOGLE_ADS_DISABLE_MUTATIONS", "").strip().lower()
+    return v in ("1", "true", "yes")
+
+
+def _mutate_validate_only_forced() -> bool:
+    v = os.environ.get("GOOGLE_ADS_MUTATE_VALIDATE_ONLY", "").strip().lower()
+    return v in ("1", "true", "yes")
+
+
+def _post_with_login_retry(
+    url: str, json_body: Dict[str, Any], creds=None
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """
+    POST JSON to a Google Ads REST endpoint, retrying without login-customer-id
+    on USER_PERMISSION_DENIED (same pattern as make_api_request).
+    """
+    if creds is None:
+        creds = get_credentials()
+    for include_login in (True, False):
+        headers = get_headers(creds, include_login_customer_id=include_login)
+        resp = requests.post(
+            url,
+            headers=headers,
+            json=json_body,
+            timeout=_google_ads_http_timeout_seconds(),
+        )
+        if resp.status_code == 200:
+            return resp.json(), None
+        if include_login and resp.status_code == 403:
+            try:
+                err = resp.json()
+                details = err.get("error", {}).get("details", [{}])[0]
+                errors = details.get("errors", [{}])[0]
+                code = errors.get("errorCode", {})
+                if (
+                    code.get("authorizationError") == "USER_PERMISSION_DENIED"
+                    or code.get("authorizationError") == "CUSTOMER_NOT_ENABLED"
+                ):
+                    logger.info(
+                        "Permission denied with login-customer-id on mutate, retrying without it"
+                    )
+                    continue
+            except Exception:
+                pass
+        return None, resp.text
+    return None, "Request failed after retrying without login-customer-id"
+
+
+def _format_mutate_response(label: str, body: Dict[str, Any]) -> str:
+    """Readable summary for campaigns:mutate / campaignBudgets:mutate JSON."""
+    lines = [label, "-" * 60]
+    lines.append(json.dumps(body, indent=2, default=str))
+    return "\n".join(lines)
+
+
 def _format_execute_gaql_table(formatted_customer_id: str, rows: List[Dict[str, Any]]) -> str:
     """Same pipe-delimited layout as the historical execute_gaql_query table output."""
     result_lines = [f"Query Results for Account {formatted_customer_id}:"]
@@ -1890,6 +1946,194 @@ async def list_resources(
     
     # Use your existing run_gaql function to execute this query
     return await run_gaql(customer_id, query)
+
+
+@mcp.tool()
+async def update_search_campaign(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(
+        description="Numeric campaign.id for the campaign to update (digits only; dashes allowed and stripped)"
+    ),
+    status: Optional[str] = Field(
+        default=None,
+        description="New campaign status: ENABLED or PAUSED. Omit if you only change name.",
+    ),
+    name: Optional[str] = Field(
+        default=None,
+        description="New campaign name. Omit if you only change status.",
+    ),
+    validate_only: bool = Field(
+        default=False,
+        description="If True, the API validates the mutate but does not apply it (dry run).",
+    ),
+    allow_non_search: bool = Field(
+        default=False,
+        description="If False (default), refuse when advertising_channel_type is not SEARCH.",
+    ),
+) -> str:
+    """
+    Update an existing **Search** campaign via the Google Ads REST **campaigns:mutate** endpoint.
+
+    Supported sparse updates: **status**, **name** (at least one required). Use **validate_only**
+    to dry-run. Set env **GOOGLE_ADS_DISABLE_MUTATIONS=1** to block all mutates. Set
+    **GOOGLE_ADS_MUTATE_VALIDATE_ONLY=1** to force validate-only for every call.
+
+    REST reference: ``POST customers/{customerId}/campaigns:mutate`` with an ``operations`` array.
+    """
+    if _mutations_disabled_by_env():
+        return "Mutations are disabled (GOOGLE_ADS_DISABLE_MUTATIONS=1). Remove or unset to allow updates."
+
+    if not status and not name:
+        return "Error: provide at least one of `status` or `name`."
+
+    if status and str(status).upper() not in ("ENABLED", "PAUSED"):
+        return "Error: `status` must be ENABLED or PAUSED."
+
+    if _mutate_validate_only_forced():
+        validate_only = True
+
+    formatted_customer_id = format_customer_id(customer_id)
+    cid_digits = "".join(ch for ch in str(campaign_id) if ch.isdigit())
+    if not cid_digits:
+        return "Error: campaign_id must contain digits."
+
+    pre_query = f"""
+        SELECT
+            campaign.id,
+            campaign.name,
+            campaign.status,
+            campaign.advertising_channel_type
+        FROM campaign
+        WHERE campaign.id = {cid_digits}
+        LIMIT 1
+    """
+    rows, err = _gaql_search_raw(formatted_customer_id, pre_query)
+    if err:
+        return f"Pre-check GAQL failed: {err}"
+    if not rows:
+        return f"No campaign found with id {cid_digits} in customer {formatted_customer_id}."
+
+    row0 = rows[0]
+    ch = (row0.get("campaign") or {}).get("advertisingChannelType", "")
+    if not allow_non_search and ch != "SEARCH":
+        return (
+            f"Refusing mutate: campaign {cid_digits} has advertising_channel_type={ch!r}, "
+            f"expected SEARCH. Pass allow_non_search=True to override."
+        )
+
+    resource_name = f"customers/{formatted_customer_id}/campaigns/{cid_digits}"
+    update_obj: Dict[str, Any] = {"resourceName": resource_name}
+    mask_parts: List[str] = []
+
+    if name is not None:
+        update_obj["name"] = str(name)
+        mask_parts.append("name")
+    if status is not None:
+        update_obj["status"] = str(status).upper()
+        mask_parts.append("status")
+
+    body = {
+        "operations": [{"updateMask": ",".join(mask_parts), "update": update_obj}],
+        "validateOnly": bool(validate_only),
+        "partialFailure": False,
+    }
+
+    url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/campaigns:mutate"
+    data, m_err = _post_with_login_retry(url, body)
+    if m_err:
+        return f"Mutate failed: {m_err}"
+    return _format_mutate_response(
+        f"campaigns:mutate ({'validate_only' if validate_only else 'applied'}) "
+        f"customer={formatted_customer_id} campaign={cid_digits}",
+        data or {},
+    )
+
+
+@mcp.tool()
+async def update_search_campaign_budget_micros(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
+    campaign_id: str = Field(
+        description="Numeric campaign.id whose **linked campaign budget** should be updated"
+    ),
+    amount_micros: int = Field(
+        description="New daily budget in **account currency micros** (e.g. 5000000 = 5.00 INR/USD units)"
+    ),
+    validate_only: bool = Field(
+        default=False,
+        description="If True, validate the mutate but do not apply it.",
+    ),
+    allow_non_search: bool = Field(
+        default=False,
+        description="If False (default), refuse when the campaign is not SEARCH.",
+    ),
+) -> str:
+    """
+    Set the **daily budget amount** for the **CampaignBudget** linked to a **Search** campaign.
+
+    Resolves ``campaign.campaign_budget`` via GAQL, then calls **campaignBudgets:mutate** with
+    ``updateMask: amountMicros``. Same env guards as ``update_search_campaign``.
+    """
+    if _mutations_disabled_by_env():
+        return "Mutations are disabled (GOOGLE_ADS_DISABLE_MUTATIONS=1). Remove or unset to allow updates."
+
+    if amount_micros <= 0:
+        return "Error: amount_micros must be a positive integer."
+
+    if _mutate_validate_only_forced():
+        validate_only = True
+
+    formatted_customer_id = format_customer_id(customer_id)
+    camp_digits = "".join(ch for ch in str(campaign_id) if ch.isdigit())
+    if not camp_digits:
+        return "Error: campaign_id must contain digits."
+
+    pre_query = f"""
+        SELECT
+            campaign.id,
+            campaign.advertising_channel_type,
+            campaign.campaign_budget
+        FROM campaign
+        WHERE campaign.id = {camp_digits}
+        LIMIT 1
+    """
+    rows, err = _gaql_search_raw(formatted_customer_id, pre_query)
+    if err:
+        return f"Pre-check GAQL failed: {err}"
+    if not rows:
+        return f"No campaign found with id {camp_digits} in customer {formatted_customer_id}."
+
+    camp = rows[0].get("campaign") or {}
+    ch = camp.get("advertisingChannelType", "")
+    if not allow_non_search and ch != "SEARCH":
+        return (
+            f"Refusing mutate: campaign {camp_digits} has advertising_channel_type={ch!r}, "
+            f"expected SEARCH. Pass allow_non_search=True to override."
+        )
+
+    budget_rn = camp.get("campaignBudget")
+    if not budget_rn:
+        return "Campaign has no campaign_budget resource link; cannot update budget via this helper."
+
+    body = {
+        "operations": [
+            {
+                "updateMask": "amountMicros",
+                "update": {"resourceName": budget_rn, "amountMicros": int(amount_micros)},
+            }
+        ],
+        "validateOnly": bool(validate_only),
+        "partialFailure": False,
+    }
+
+    url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/campaignBudgets:mutate"
+    data, m_err = _post_with_login_retry(url, body)
+    if m_err:
+        return f"Mutate failed: {m_err}"
+    return _format_mutate_response(
+        f"campaignBudgets:mutate ({'validate_only' if validate_only else 'applied'}) "
+        f"customer={formatted_customer_id} campaign={camp_digits} budget={budget_rn}",
+        data or {},
+    )
 
 
 # Register Supabase memory / reporting tools (optional; requires SUPABASE_* env vars)
