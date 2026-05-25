@@ -27,6 +27,15 @@ This document describes what the **Google Ads MCP** exposes: there is no separat
 | `generate_keyword_ideas` | **Keyword Planner:** discover ideas from seed keywords, a page URL, or a site; returns volume, competition, CPC ranges. |
 | `get_keyword_metrics` | **Keyword Planner:** historical metrics for an explicit keyword list (search volume, competition, bids). |
 | `suggest_geo_targets` | Resolve location names (e.g. India, Mumbai) to `geoTargetConstants/…` resource names. |
+| `update_search_campaign` | **Mutate (write):** sparse update of an existing **SEARCH** campaign via REST `campaigns:mutate` — **`status`** (ENABLED/PAUSED) and/or **`name`**. Pre-checks channel type with GAQL. Supports **`validate_only`**. |
+| `update_search_campaign_budget_micros` | **Mutate (write):** set the linked **CampaignBudget** daily **`amountMicros`** for a **SEARCH** campaign via REST `campaignBudgets:mutate`. Same guards as `update_search_campaign`. |
+
+### Search campaign mutates (safety switches)
+
+- **`GOOGLE_ADS_DISABLE_MUTATIONS=1`** — all mutate tools return an error (read-only / staging).
+- **`GOOGLE_ADS_MUTATE_VALIDATE_ONLY=1`** — force **`validate_only`** on every mutate (dry-run only).
+
+These use the same auth headers as GAQL (`developer-token`, bearer, optional `login-customer-id` retry).
 
 ## Campaign edit tools (write / mutate API)
 
