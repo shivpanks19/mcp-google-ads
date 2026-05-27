@@ -18,6 +18,7 @@ from googleapiclient.discovery import build
 from pydantic import Field
 
 from google_ads_server import GOOGLE_ADS_CREDENTIALS_PATH, _load_credentials_dict_from_env, mcp
+import sheets_file_io as sio
 
 logger = logging.getLogger("google_ads_server")
 
@@ -221,6 +222,83 @@ def append_sheet_values(
     }
 
 
+def append_sheet_values_batched(
+    spreadsheet_id: str,
+    range_a1: str,
+    values: List[List[Any]],
+    *,
+    value_input_option: str = "USER_ENTERED",
+    batch_size: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Append many rows using server-side batching (one MCP call, many API requests)."""
+    if not values:
+        return {"appendedRows": 0, "batches": 0}
+    chunks = sio.split_rows_into_batches(values, batch_size)
+    total_rows = 0
+    total_cells = 0
+    last_range: Optional[str] = None
+    for chunk in chunks:
+        result = append_sheet_values(
+            spreadsheet_id,
+            range_a1,
+            chunk,
+            value_input_option=value_input_option,
+        )
+        total_rows += len(chunk)
+        total_cells += int(result.get("updatedCells") or 0)
+        last_range = result.get("updatedRange") or last_range
+    return {
+        "appendedRows": total_rows,
+        "batches": len(chunks),
+        "updatedRange": last_range,
+        "updatedCells": total_cells,
+    }
+
+
+def write_sheet_values_batched(
+    spreadsheet_id: str,
+    range_a1: str,
+    values: List[List[Any]],
+    *,
+    value_input_option: str = "USER_ENTERED",
+    batch_size: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Write a large grid in sequential chunks (first update, then append batches)."""
+    if not values:
+        return {"updatedRows": 0, "batches": 0}
+    chunks = sio.split_rows_into_batches(values, batch_size)
+    total_rows = 0
+    total_cells = 0
+    last_range: Optional[str] = None
+
+    first = chunks[0]
+    result = write_sheet_values(spreadsheet_id, range_a1, first, value_input_option=value_input_option)
+    total_rows += len(first)
+    total_cells += int(result.get("updatedCells") or 0)
+    last_range = result.get("updatedRange") or last_range
+
+    if len(chunks) > 1:
+        tab_anchor = range_a1.split("!", 1)[0] + "!A1" if "!" in range_a1 else "A1"
+        tail = [row for chunk in chunks[1:] for row in chunk]
+        tail_result = append_sheet_values_batched(
+            spreadsheet_id,
+            tab_anchor,
+            tail,
+            value_input_option=value_input_option,
+            batch_size=batch_size,
+        )
+        total_rows += int(tail_result.get("appendedRows") or 0)
+        total_cells += int(tail_result.get("updatedCells") or 0)
+        last_range = tail_result.get("updatedRange") or last_range
+
+    return {
+        "updatedRows": total_rows,
+        "batches": len(chunks),
+        "updatedRange": last_range,
+        "updatedCells": total_cells,
+    }
+
+
 def clear_sheet_range(spreadsheet_id: str, range_a1: str) -> Dict[str, Any]:
     """Clear values in a range (keeps formatting)."""
     service = create_sheets_service()
@@ -263,11 +341,19 @@ def build_sheet_report(
     if clear_tab:
         clear_sheet_range(spreadsheet_id, _sheet_range_a1(title))
 
-    write_result = write_sheet_values(
-        spreadsheet_id,
-        _sheet_range_a1(title, start_cell),
-        grid,
-    )
+    range_a1 = _sheet_range_a1(title, start_cell)
+    if len(grid) > sio.batch_row_limit():
+        write_result = write_sheet_values_batched(
+            spreadsheet_id,
+            range_a1,
+            grid,
+        )
+    else:
+        write_result = write_sheet_values(
+            spreadsheet_id,
+            range_a1,
+            grid,
+        )
     return {
         "spreadsheetId": spreadsheet_id,
         "sheetTitle": title,
@@ -612,14 +698,21 @@ async def append_sheet_rows(
     try:
         sid = _resolve_spreadsheet_id(spreadsheet_id)
         grid = _parse_values_json(rows)
-        result = append_sheet_values(
+        grid = sio.truncate_rows(grid)
+        result = append_sheet_values_batched(
             sid,
             _sheet_range_a1(sheet_title, "A1"),
             grid,
             value_input_option=value_input_option,
         )
         return _json_response(
-            {"spreadsheetId": sid, "sheetTitle": sheet_title, "appendedRows": len(grid), **result}
+            {
+                "spreadsheetId": sid,
+                "sheetTitle": sheet_title,
+                "appendedRows": result.get("appendedRows", len(grid)),
+                "batches": result.get("batches", 1),
+                **{k: v for k, v in result.items() if k not in ("appendedRows", "batches")},
+            }
         )
     except Exception as e:
         logger.exception("append_sheet_rows failed")
@@ -730,4 +823,211 @@ async def write_sheet_report(
         return _json_response(result)
     except Exception as e:
         logger.exception("write_sheet_report failed")
+        return _json_response({"error": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+async def append_sheet_rows_from_file(
+    sheet_title: Annotated[str, Field(description="Worksheet tab title")],
+    file_path: Annotated[
+        str,
+        Field(description="Path to rows file on the MCP server (must be under GOOGLE_SHEETS_ALLOWED_PATHS)"),
+    ],
+    spreadsheet_id: Annotated[
+        Optional[str],
+        Field(default=None, description="Spreadsheet ID (defaults to GOOGLE_SHEETS_SPREADSHEET_ID)"),
+    ] = None,
+    format: Annotated[
+        str,
+        Field(
+            description="File format: auto | json_rows | ndjson | csv | markdown (default auto from extension)",
+        ),
+    ] = "auto",
+    truncate_cell_chars: Annotated[
+        Optional[int],
+        Field(default=None, description="Max characters per cell (default GOOGLE_SHEETS_MAX_CELL_CHARS)"),
+    ] = None,
+    value_input_option: Annotated[str, Field(description="RAW or USER_ENTERED")] = "USER_ENTERED",
+) -> str:
+    """
+    Append rows by reading a file on the MCP server filesystem (fast path for local MCP).
+
+    The agent passes only a short file_path — no huge JSON through the tool channel.
+    For Cursor Cloud → remote Render MCP, use append_sheet_rows_base64 instead.
+    """
+    try:
+        sid = _resolve_spreadsheet_id(spreadsheet_id)
+        path = sio.resolve_allowed_file_path(file_path)
+        grid = sio.load_rows_from_file(path, format)
+        grid = sio.truncate_rows(grid, max_chars=truncate_cell_chars)
+        result = append_sheet_values_batched(
+            sid,
+            _sheet_range_a1(sheet_title, "A1"),
+            grid,
+            value_input_option=value_input_option,
+        )
+        return _json_response(
+            {
+                "spreadsheetId": sid,
+                "sheetTitle": sheet_title,
+                "filePath": str(path),
+                "sourceRows": len(grid),
+                **result,
+            }
+        )
+    except Exception as e:
+        logger.exception("append_sheet_rows_from_file failed")
+        return _json_response({"error": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+async def append_sheet_rows_base64(
+    sheet_title: Annotated[str, Field(description="Worksheet tab title")],
+    data_base64: Annotated[
+        str,
+        Field(description="Base64-encoded file body (optionally gzip-compressed)"),
+    ],
+    spreadsheet_id: Annotated[
+        Optional[str],
+        Field(default=None, description="Spreadsheet ID (defaults to GOOGLE_SHEETS_SPREADSHEET_ID)"),
+    ] = None,
+    format: Annotated[
+        str,
+        Field(description="Payload format: json_rows | ndjson | csv | markdown"),
+    ] = "json_rows",
+    gzip_compressed: Annotated[
+        bool,
+        Field(description="Set true if data_base64 is gzip-compressed (recommended for large markdown/JSON)"),
+    ] = False,
+    truncate_cell_chars: Annotated[
+        Optional[int],
+        Field(default=None, description="Max characters per cell"),
+    ] = None,
+    value_input_option: Annotated[str, Field(description="RAW or USER_ENTERED")] = "USER_ENTERED",
+) -> str:
+    """
+    Append rows from a base64 (optionally gzip) payload — use for Cursor Cloud → remote MCP.
+
+    Agent reads the report file locally, gzip+base64 encodes it once, passes a compact string.
+    MCP decodes server-side and batch-uploads to Sheets.
+    """
+    try:
+        sid = _resolve_spreadsheet_id(spreadsheet_id)
+        grid = sio.load_rows_from_base64(data_base64, format, gzip_compressed=gzip_compressed)
+        grid = sio.truncate_rows(grid, max_chars=truncate_cell_chars)
+        result = append_sheet_values_batched(
+            sid,
+            _sheet_range_a1(sheet_title, "A1"),
+            grid,
+            value_input_option=value_input_option,
+        )
+        return _json_response(
+            {
+                "spreadsheetId": sid,
+                "sheetTitle": sheet_title,
+                "sourceRows": len(grid),
+                "gzipCompressed": gzip_compressed,
+                **result,
+            }
+        )
+    except Exception as e:
+        logger.exception("append_sheet_rows_base64 failed")
+        return _json_response({"error": f"{type(e).__name__}: {e}"})
+
+
+@mcp.tool()
+async def push_markdown_tables_to_sheet(
+    sheet_title: Annotated[str, Field(description="Worksheet tab to write tables into")],
+    spreadsheet_id: Annotated[
+        Optional[str],
+        Field(default=None, description="Spreadsheet ID (defaults to GOOGLE_SHEETS_SPREADSHEET_ID)"),
+    ] = None,
+    file_path: Annotated[
+        Optional[str],
+        Field(default=None, description="Markdown file on MCP server (local MCP fast path)"),
+    ] = None,
+    markdown_content: Annotated[
+        Optional[str],
+        Field(default=None, description="Inline markdown (small reports only)"),
+    ] = None,
+    markdown_base64_gz: Annotated[
+        Optional[str],
+        Field(
+            default=None,
+            description="gzip+base64 markdown (best for Cursor Cloud → remote MCP with large .md reports)",
+        ),
+    ] = None,
+    clear_tab: Annotated[bool, Field(description="Clear tab before writing")] = True,
+    create_tab_if_missing: Annotated[bool, Field(description="Create tab if missing")] = True,
+    truncate_cell_chars: Annotated[
+        Optional[int],
+        Field(default=None, description="Truncate long RSA/ad copy cells to this length"),
+    ] = None,
+    table_index: Annotated[
+        Optional[int],
+        Field(
+            default=None,
+            description="0-based table index if markdown has multiple tables (default: write all, separated by blank rows)",
+        ),
+    ] = None,
+) -> str:
+    """
+    Parse markdown pipe tables and push to Google Sheets in one MCP call.
+
+    Handles escaped pipes (\\|) in cells. Prefer file_path (local MCP) or markdown_base64_gz
+    (cloud automation) over inline markdown_content for large weekly reports.
+    """
+    try:
+        sid = _resolve_spreadsheet_id(spreadsheet_id)
+        if markdown_base64_gz:
+            md_text = sio.decode_base64_payload(markdown_base64_gz, gzip_compressed=True).decode("utf-8")
+        elif file_path:
+            path = sio.resolve_allowed_file_path(file_path)
+            md_text = path.read_text(encoding="utf-8")
+        elif markdown_content:
+            md_text = markdown_content
+        else:
+            raise ValueError("Provide file_path, markdown_content, or markdown_base64_gz")
+
+        tables = sio.parse_markdown_tables(md_text)
+        if not tables:
+            return _json_response({"error": "No markdown tables found"})
+
+        if table_index is not None:
+            if table_index < 0 or table_index >= len(tables):
+                raise ValueError(f"table_index out of range (0..{len(tables) - 1})")
+            tables = [tables[table_index]]
+
+        if create_tab_if_missing:
+            create_sheet_tab(sid, sheet_title)
+        if clear_tab:
+            clear_sheet_range(sid, _sheet_range_a1(sheet_title))
+
+        grid: List[List[Any]] = []
+        for idx, table in enumerate(tables):
+            if idx > 0:
+                grid.append([])
+            if table.get("title"):
+                grid.append([table["title"]])
+            if table.get("headers"):
+                grid.append(table["headers"])
+            grid.extend(table.get("rows") or [])
+
+        grid = sio.truncate_rows(grid, max_chars=truncate_cell_chars)
+        result = write_sheet_values_batched(
+            sid,
+            _sheet_range_a1(sheet_title, "A1"),
+            grid,
+        )
+        return _json_response(
+            {
+                "spreadsheetId": sid,
+                "sheetTitle": sheet_title,
+                "tablesWritten": len(tables),
+                "rowsWritten": len(grid),
+                **result,
+            }
+        )
+    except Exception as e:
+        logger.exception("push_markdown_tables_to_sheet failed")
         return _json_response({"error": f"{type(e).__name__}: {e}"})

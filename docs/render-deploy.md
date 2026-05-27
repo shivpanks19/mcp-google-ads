@@ -20,7 +20,17 @@ Host the Google Ads MCP server as a **Web Service** with **streamable HTTP** so 
 
 Sheets uses **`spreadsheets`** scope (read/write) on the same JSON — separate from Ads `adwords` scope. Do not reuse `get_credentials()` for Sheets calls.
 
-**Sheets MCP tools:** `list_sheet_tabs`, `read_sheet_range`, `write_sheet_range`, `append_sheet_rows`, `clear_sheet_tab`, `create_sheet_tab_tool`, `write_sheet_report`, `read_email_leads` (optional CRM tab).
+**Sheets MCP tools:** `list_sheet_tabs`, `read_sheet_range`, `write_sheet_range`, `append_sheet_rows`, `append_sheet_rows_from_file`, `append_sheet_rows_base64`, `push_markdown_tables_to_sheet`, `clear_sheet_tab`, `create_sheet_tab_tool`, `write_sheet_report`, `read_email_leads`.
+
+For **large reports** (Cursor Cloud → remote MCP), prefer `push_markdown_tables_to_sheet(markdown_base64_gz=...)` or `append_sheet_rows_base64(gzip_compressed=true)` so the agent passes a compressed payload instead of megabyte JSON rows. Server-side batching splits API calls automatically.
+
+Optional env:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `GOOGLE_SHEETS_ALLOWED_PATHS` | `/tmp,/workspace,/Users` | Roots for `*_from_file` tools |
+| `GOOGLE_SHEETS_APPEND_BATCH_ROWS` | `500` | Rows per Sheets API batch |
+| `GOOGLE_SHEETS_MAX_CELL_CHARS` | `49000` | Truncate long RSA/ad copy cells |
 
 ---
 
