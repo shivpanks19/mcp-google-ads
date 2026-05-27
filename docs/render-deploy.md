@@ -9,6 +9,18 @@ Host the Google Ads MCP server as a **Web Service** with **streamable HTTP** so 
 3. **Google Ads service account** JSON (OAuth with browser does **not** work on Render)
 4. Google Ads **developer token** (Basic/Standard for Keyword Planner)
 5. Service account email invited in Google Ads: **Tools & settings → Access and security → Users** with **Standard** (edit) access if you use campaign mutate tools on Render
+6. **Google Sheets API** enabled in the same GCP project as the service account; E-mail leads spreadsheet **shared** with the service account email (Viewer or Editor)
+
+### Google Sheets setup
+
+1. GCP Console → same project as `GOOGLE_ADS_CREDENTIALS_JSON` → enable **Google Sheets API** (and optionally **Google Drive API**).
+2. Open the spreadsheet → **Share** → add the service account `client_email` from the JSON (e.g. `google-ads-sa@your-project.iam.gserviceaccount.com`) as **Editor** (required for `write_sheet_report` / `append_sheet_rows`; Viewer is read-only).
+3. Set `GOOGLE_SHEETS_SPREADSHEET_ID` in Render (ID from the sheet URL, not the full URL).
+4. After deploy, call MCP tool `read_email_leads` or `list_sheet_tabs` to verify.
+
+Sheets uses **`spreadsheets`** scope (read/write) on the same JSON — separate from Ads `adwords` scope. Do not reuse `get_credentials()` for Sheets calls.
+
+**Sheets MCP tools:** `list_sheet_tabs`, `read_sheet_range`, `write_sheet_range`, `append_sheet_rows`, `clear_sheet_tab`, `create_sheet_tab_tool`, `write_sheet_report`, `read_email_leads` (optional CRM tab).
 
 ---
 
@@ -57,7 +69,10 @@ Paste as a **single line** in Render (no line breaks). Mark as **Secret**.
 
 | Variable | When to set |
 |----------|-------------|
-| `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | MCC manager ID (10 digits, no dashes) when accessing client accounts under an MCC |
+| `GOOGLE_ADS_LOGIN_CUSTOMER_ID` | **Required for MCC child accounts.** Manager ID `1698765209` (Hexanovate MCC). Without this, `generate_keyword_ideas` may return `CUSTOMER_NOT_FOUND` while `run_gaql` still works. |
+| `GOOGLE_SHEETS_SPREADSHEET_ID` | Spreadsheet ID for E-mail leads tools (`read_email_leads`, `read_sheet_range`). Share the sheet with the service account email. |
+| `GOOGLE_SHEETS_EMAIL_LEADS_TAB` | Tab name (default `E-mail leads`) |
+| `GOOGLE_SHEETS_LEAD_PIPELINE_TAB` | Optional tab name for future Lead Pipeline tools |
 | `GOOGLE_ADS_REQUEST_TIMEOUT` | GAQL timeout seconds (default `120`) |
 | `SUPABASE_URL` | Supabase memory / snapshots |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabase **service_role** key (secret) |
@@ -130,6 +145,10 @@ Exact JSON shape depends on your Cursor version; use the deployed **`/mcp`** URL
 | Build fails on matplotlib/pandas | Optional deps in `requirements.txt`; upgrade Render plan or pin lighter versions if needed |
 | `OAuth needs a local browser` | Set `GOOGLE_ADS_AUTH_TYPE=service_account` and `GOOGLE_ADS_CREDENTIALS_JSON` |
 | `USER_PERMISSION_DENIED` | Invite service account email in Google Ads; set `GOOGLE_ADS_LOGIN_CUSTOMER_ID` for MCC |
+| `CUSTOMER_NOT_FOUND` on Keyword Planner only | Set `GOOGLE_ADS_LOGIN_CUSTOMER_ID=1698765209` and redeploy; verify `GET /health` shows `"login_customer_id_configured": true` |
+| Sheets `403 Permission denied` | Share spreadsheet with service account email; enable Sheets API in GCP |
+| Sheets empty / wrong tab | Set `GOOGLE_SHEETS_EMAIL_LEADS_TAB` exactly (case-sensitive, default `E-mail leads`) |
+| `invalid_scope` on Sheets | Sheets tools use `spreadsheets.readonly`, not `adwords` — use `read_sheet_range` / `read_email_leads`, not Ads credentials |
 | `DEVELOPER_TOKEN_NOT_APPROVED` | Upgrade developer token to Basic/Standard in Google Ads API Center |
 | Health check fails | Ensure **Health Check Path** is `/health` and **Start Command** is `python main.py` |
 | Free tier sleeps | First request after idle may be slow (~30s); use Starter plan for always-on |
@@ -144,6 +163,9 @@ export PORT=8000
 export GOOGLE_ADS_AUTH_TYPE=service_account
 export GOOGLE_ADS_CREDENTIALS_JSON='{"type":"service_account",...}'
 export GOOGLE_ADS_DEVELOPER_TOKEN=your_token
+export GOOGLE_ADS_LOGIN_CUSTOMER_ID=1698765209
+export GOOGLE_SHEETS_SPREADSHEET_ID=your_spreadsheet_id
 python main.py
 # curl http://127.0.0.1:8000/health
+# MCP tools: list_sheet_tabs, read_sheet_range, read_email_leads
 ```

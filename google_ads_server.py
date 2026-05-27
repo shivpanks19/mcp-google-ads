@@ -373,8 +373,39 @@ def get_headers(creds, include_login_customer_id: bool = False):
     return headers
 
 
+def _should_retry_without_login_customer_id(resp) -> bool:
+    """True when a login-customer-id header likely caused the failure (retry bare)."""
+    if resp.status_code not in (400, 401, 403):
+        return False
+    body = resp.text or ""
+    if "CUSTOMER_NOT_FOUND" in body:
+        return True
+    try:
+        err_code = (
+            resp.json()
+            .get("error", {})
+            .get("details", [{}])[0]
+            .get("errors", [{}])[0]
+            .get("errorCode", {})
+        )
+        return any(
+            k in err_code
+            for k in (
+                "authorizationError",
+                "authenticationError",
+                "authorization_error",
+                "authentication_error",
+            )
+        ) and any(
+            v in ("USER_PERMISSION_DENIED", "CUSTOMER_NOT_ENABLED", "CUSTOMER_NOT_FOUND")
+            for v in err_code.values()
+        )
+    except Exception:
+        return False
+
+
 def make_api_request(url: str, method: str = 'POST', payload: dict = None, creds=None):
-    """Make a Google Ads API request, automatically retrying without login-customer-id on permission errors.
+    """Make a Google Ads API request, retrying with/without login-customer-id on auth errors.
     
     Returns:
         (response_json, error_string) — one of which will be None.
@@ -382,6 +413,7 @@ def make_api_request(url: str, method: str = 'POST', payload: dict = None, creds
     if creds is None:
         creds = get_credentials()
 
+    last_error = None
     for include_login in (True, False):
         headers = get_headers(creds, include_login_customer_id=include_login)
         if method == 'GET':
@@ -392,22 +424,19 @@ def make_api_request(url: str, method: str = 'POST', payload: dict = None, creds
         if resp.status_code == 200:
             return resp.json(), None
 
-        # On permission errors, retry without login-customer-id
-        if include_login and resp.status_code == 403:
-            try:
-                err_code = (resp.json().get('error', {})
-                            .get('details', [{}])[0]
-                            .get('errors', [{}])[0]
-                            .get('errorCode', {}))
-                if 'USER_PERMISSION_DENIED' in err_code.values() or 'CUSTOMER_NOT_ENABLED' in err_code.values():
-                    logger.info("Permission denied with login-customer-id, retrying without it")
-                    continue
-            except Exception:
-                pass
+        last_error = resp.text
 
-        return None, resp.text
+        # Retry without login-customer-id when MCC header causes CUSTOMER_NOT_FOUND / permission errors
+        if include_login and _should_retry_without_login_customer_id(resp):
+            logger.info(
+                "Auth error with login-customer-id (%s), retrying without it",
+                resp.status_code,
+            )
+            continue
 
-    return None, "Request failed after retrying without login-customer-id"
+        return None, last_error
+
+    return None, last_error or "Request failed after retrying without login-customer-id"
 
 @mcp.tool()
 async def list_accounts() -> str:
@@ -2142,6 +2171,7 @@ import analysis_tools  # noqa: E402, F401
 import keyword_plan_tools  # noqa: E402, F401
 import campaign_edit_tools  # noqa: E402, F401
 import optimization_actions  # noqa: E402, F401
+import sheets_tools  # noqa: E402, F401
 
 if __name__ == "__main__":
     # Start the MCP server on stdio transport

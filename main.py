@@ -16,7 +16,20 @@ from google_ads_server import mcp  # noqa: E402
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_request: Request) -> JSONResponse:
     """Render / load-balancer health check (no auth)."""
-    return JSONResponse({"status": "ok", "service": "mcp-google-ads"})
+    import os
+
+    login_raw = (os.environ.get("GOOGLE_ADS_LOGIN_CUSTOMER_ID") or "").strip()
+    login_digits = "".join(c for c in login_raw if c.isdigit())
+    sheets_id = (os.environ.get("GOOGLE_SHEETS_SPREADSHEET_ID") or "").strip()
+    return JSONResponse(
+        {
+            "status": "ok",
+            "service": "mcp-google-ads",
+            "auth_type": os.environ.get("GOOGLE_ADS_AUTH_TYPE", ""),
+            "login_customer_id_configured": bool(login_digits),
+            "sheets_spreadsheet_configured": bool(sheets_id),
+        }
+    )
 
 
 @mcp.custom_route("/", methods=["GET"])

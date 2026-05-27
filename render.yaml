@@ -20,8 +20,15 @@ services:
         sync: false
       - key: GOOGLE_ADS_CREDENTIALS_JSON
         sync: false
+      # Hexanovate manager MCC (Keyword Planner + child accounts). Not Roombr client 6399164303.
       - key: GOOGLE_ADS_LOGIN_CUSTOMER_ID
+        value: "1698765209"
+      - key: GOOGLE_SHEETS_SPREADSHEET_ID
         sync: false
+      - key: GOOGLE_SHEETS_EMAIL_LEADS_TAB
+        value: "E-mail leads"
+      - key: GOOGLE_SHEETS_LEAD_PIPELINE_TAB
+        value: "Lead Pipeline"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
