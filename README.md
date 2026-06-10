@@ -117,6 +117,9 @@ Mutations apply **immediately** in Google Ads. Credentials need **edit** access.
 | **What You Can Ask For** | **What It Does** |
 |--------------------------|------------------|
 | `get_campaign_settings` | Read status, budget, bidding before changing a campaign |
+| `create_paused_search_campaign_build` | Create a full paused Search build: budget, campaign, ad groups, keywords, RSAs, negatives |
+| `create_search_campaign` | Create a paused Search campaign from an existing budget |
+| `create_ad_groups`, `create_keywords`, `create_responsive_search_ad` | Build Search launch components individually |
 | `update_campaign_status` | Pause or enable a campaign |
 | `update_campaign_budget` | Set daily budget (account currency) |
 | `add_negative_keywords` | Add campaign or ad group negatives |

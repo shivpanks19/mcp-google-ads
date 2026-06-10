@@ -22,6 +22,7 @@ MUTATE_RESOURCES = frozenset(
         "campaigns",
         "campaignBudgets",
         "adGroups",
+        "adGroupAds",
         "campaignCriteria",
         "adGroupCriteria",
     }
@@ -45,6 +46,10 @@ def campaign_resource_name(customer_id: str, campaign_id: str) -> str:
 
 def ad_group_resource_name(customer_id: str, ad_group_id: str) -> str:
     return f"customers/{format_customer_id(customer_id)}/adGroups/{str(ad_group_id).strip()}"
+
+
+def ad_group_ad_resource_name(customer_id: str, ad_group_id: str, ad_id: str) -> str:
+    return f"customers/{format_customer_id(customer_id)}/adGroupAds/{str(ad_group_id).strip()}~{str(ad_id).strip()}"
 
 
 def campaign_budget_resource_name(customer_id: str, budget_id: str) -> str:
@@ -362,6 +367,8 @@ def _mutate_raw(
     operations: List[Dict[str, Any]],
     creds=None,
     response_content_type: str = "MUTABLE_RESOURCE",
+    validate_only: bool = False,
+    partial_failure: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     if resource not in MUTATE_RESOURCES:
         return None, f"Unsupported mutate resource: {resource}"
@@ -372,6 +379,33 @@ def _mutate_raw(
     url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{fid}/{resource}:mutate"
     payload: Dict[str, Any] = {
         "operations": operations,
+        "responseContentType": response_content_type,
+        "validateOnly": bool(validate_only),
+        "partialFailure": bool(partial_failure),
+    }
+    data, error = make_api_request(url, method="POST", payload=payload, creds=creds)
+    if error:
+        return None, parse_mutate_error(error)
+    return data, None
+
+
+def mutate_google_ads_operations(
+    customer_id: str,
+    operations: List[Dict[str, Any]],
+    creds=None,
+    validate_only: bool = False,
+    partial_failure: bool = False,
+    response_content_type: str = "MUTABLE_RESOURCE",
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Run GoogleAdsService.Mutate for cross-resource operations with temporary IDs."""
+    if not operations:
+        return None, "No mutate operations provided."
+    fid = format_customer_id(customer_id)
+    url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{fid}/googleAds:mutate"
+    payload: Dict[str, Any] = {
+        "mutateOperations": operations,
+        "validateOnly": bool(validate_only),
+        "partialFailure": bool(partial_failure),
         "responseContentType": response_content_type,
     }
     data, error = make_api_request(url, method="POST", payload=payload, creds=creds)

@@ -39,7 +39,7 @@ These use the same auth headers as GAQL (`developer-token`, bearer, optional `lo
 
 ## Campaign edit tools (write / mutate API)
 
-These tools **apply changes immediately** in Google Ads (no dry-run gate). Credentials need **edit** access (Standard user on the account, or service account invited with edit). Search campaigns are the primary target; PMax / Demand Gen bidding updates may return clear errors for unsupported fields.
+These tools **apply changes immediately** in Google Ads unless the tool is called with `validate_only=true` or env `GOOGLE_ADS_MUTATE_VALIDATE_ONLY=1` is set. Credentials need **edit** access (Standard user on the account, or service account invited with edit). Search campaigns are the primary target; PMax / Demand Gen bidding updates may return clear errors for unsupported fields.
 
 Registered from `campaign_edit_tools.py` and `optimization_actions.py` (imported by `google_ads_server.py`).
 
@@ -49,6 +49,18 @@ Registered from `campaign_edit_tools.py` and `optimization_actions.py` (imported
 |------|---------|
 | `get_campaign_settings` | Campaign name, status, budget, bidding strategy, target CPA/ROAS; resolve by `campaign_id` or fuzzy `campaign_name`. |
 | `list_campaign_budgets` | Budget resource IDs and amounts (for reallocation / shared-budget checks). |
+
+### Search launch creation
+
+| Tool | Purpose |
+|------|---------|
+| `create_campaign_budget` | Create a campaign budget from a daily account-currency amount. Supports `validate_only`. |
+| `create_search_campaign` | Create a paused Search campaign linked to an existing campaign budget. Defaults to Google Search only, search partners off, presence geo targeting, and Max Clicks bidding. Supports `validate_only`. |
+| `create_campaign_location_targets` | Add campaign-level geo targets by `geoTargetConstants` ID, e.g. India `2356`. Supports `validate_only`. |
+| `create_ad_groups` | Create paused Search ad groups under a campaign. Supports optional CPC bid and `validate_only`. |
+| `create_keywords` | Create paused positive ad group keywords from `{text, match_type}` rows. Supports `validate_only`. |
+| `create_responsive_search_ad` | Create one paused RSA in an ad group from final URL, 3-15 headlines, and 2-4 descriptions. Supports `validate_only`. |
+| `create_paused_search_campaign_build` | End-to-end launch helper: budget → paused Search campaign → optional locations → ad groups → keywords → RSAs → campaign negatives. Supports `validate_only`. |
 
 ### Campaign-level edits
 
@@ -111,6 +123,14 @@ GAQL cannot generate new keyword ideas or return Planner search volumes for seed
 5. **(Post-launch)** **`run_gaql`** on `search_term_view` for live query optimization.
 
 Copy-paste CLI examples: [`keyword-plan-examples.md`](keyword-plan-examples.md).
+
+## Recommended Search launch workflow
+
+1. Prepare campaign/ad group/keyword/RSA spec locally.
+2. Run `create_paused_search_campaign_build(..., validate_only=true)` to validate the full build without applying changes.
+3. Fix any policy, field, or resource errors returned by Google Ads.
+4. Run the same tool with `validate_only=false` to create everything paused.
+5. Run `get_campaign_settings` and `run_gaql` to confirm campaign, ad groups, keywords, ads, budget, network, and location state before enabling.
 
 ## Optional Supabase: memory and report snapshots
 

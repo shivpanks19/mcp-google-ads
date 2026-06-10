@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 from typing import Annotated, Any, Dict, List, Optional
 
 from pydantic import Field
@@ -17,6 +19,8 @@ logger = logging.getLogger("google_ads_server")
 
 VALID_CAMPAIGN_STATUS = frozenset({"ENABLED", "PAUSED"})
 VALID_AD_GROUP_STATUS = frozenset({"ENABLED", "PAUSED"})
+VALID_KEYWORD_MATCH_TYPES = frozenset({"EXACT", "PHRASE", "BROAD"})
+VALID_SEARCH_CAMPAIGN_BIDDING = frozenset({"MAXIMIZE_CLICKS", "MANUAL_CPC", "MAXIMIZE_CONVERSIONS"})
 VALID_BIDDING_STRATEGIES = frozenset(
     {
         "MAXIMIZE_CONVERSIONS",
@@ -30,6 +34,115 @@ VALID_BIDDING_STRATEGIES = frozenset(
 
 def _json_out(data: Any) -> str:
     return json.dumps(data, indent=2, default=str)
+
+
+def _mutations_disabled_by_env() -> bool:
+    return os.environ.get("GOOGLE_ADS_DISABLE_MUTATIONS", "").strip().lower() in ("1", "true", "yes")
+
+
+def _validate_only_forced() -> bool:
+    return os.environ.get("GOOGLE_ADS_MUTATE_VALIDATE_ONLY", "").strip().lower() in ("1", "true", "yes")
+
+
+def _effective_validate_only(validate_only: bool) -> bool:
+    return bool(validate_only) or _validate_only_forced()
+
+
+def _resource_id(resource_name: str) -> str:
+    return str(resource_name or "").split("/")[-1]
+
+
+def _gaql_string(value: str) -> str:
+    return str(value or "").replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _extract_mutate_resource_names(data: Optional[Dict[str, Any]]) -> List[str]:
+    names: List[str] = []
+    for result in (data or {}).get("results") or []:
+        rn = result.get("resourceName")
+        if rn:
+            names.append(rn)
+    return names
+
+
+def _keyword_op(ad_group_resource_name: str, text: str, match_type: str, status: str = "PAUSED") -> Dict[str, Any]:
+    mt = (match_type or "PHRASE").upper()
+    if mt not in VALID_KEYWORD_MATCH_TYPES:
+        mt = "PHRASE"
+    return {
+        "create": {
+            "adGroup": ad_group_resource_name,
+            "status": status.upper(),
+            "keyword": {"text": text.strip(), "matchType": mt},
+        }
+    }
+
+
+def _rsa_op(
+    ad_group_resource_name: str,
+    final_url: str,
+    headlines: List[str],
+    descriptions: List[str],
+    status: str = "PAUSED",
+) -> Dict[str, Any]:
+    return {
+        "create": {
+            "adGroup": ad_group_resource_name,
+            "status": status.upper(),
+            "ad": {
+                "finalUrls": [final_url],
+                "responsiveSearchAd": {
+                    "headlines": [{"text": h.strip()} for h in headlines if h and h.strip()],
+                    "descriptions": [{"text": d.strip()} for d in descriptions if d and d.strip()],
+                },
+            },
+        }
+    }
+
+
+def _existing_campaign_by_name(customer_id: str, name: str) -> Optional[Dict[str, Any]]:
+    rows, err = mh.gaql_search(
+        customer_id,
+        f"""
+        SELECT campaign.id, campaign.name, campaign.status, campaign.resource_name, campaign.advertising_channel_type
+        FROM campaign
+        WHERE campaign.name = '{_gaql_string(name)}'
+          AND campaign.status != 'REMOVED'
+        LIMIT 1
+        """,
+    )
+    if err or not rows:
+        return None
+    c = rows[0].get("campaign") or {}
+    return {
+        "id": str(c.get("id", "")),
+        "name": c.get("name") or "",
+        "status": c.get("status") or "",
+        "resource_name": c.get("resourceName") or c.get("resource_name") or "",
+        "channel_type": c.get("advertisingChannelType") or c.get("advertising_channel_type") or "",
+    }
+
+
+def _existing_budget_by_name(customer_id: str, name: str) -> Optional[Dict[str, Any]]:
+    rows, err = mh.gaql_search(
+        customer_id,
+        f"""
+        SELECT campaign_budget.id, campaign_budget.name, campaign_budget.resource_name, campaign_budget.amount_micros
+        FROM campaign_budget
+        WHERE campaign_budget.name = '{_gaql_string(name)}'
+          AND campaign_budget.status != 'REMOVED'
+        LIMIT 1
+        """,
+    )
+    if err or not rows:
+        return None
+    b = rows[0].get("campaignBudget") or rows[0].get("campaign_budget") or {}
+    return {
+        "id": str(b.get("id", "")),
+        "name": b.get("name") or "",
+        "resource_name": b.get("resourceName") or b.get("resource_name") or "",
+        "amount_micros": b.get("amountMicros") or b.get("amount_micros"),
+    }
 
 
 @mcp.tool()
@@ -100,6 +213,531 @@ async def list_campaign_budgets(
         return "\n".join(lines)
     except Exception as e:
         return f"Error listing budgets: {e}"
+
+
+@mcp.tool()
+async def create_campaign_budget(
+    customer_id: Annotated[str, Field(description="Google Ads customer ID")],
+    name: Annotated[str, Field(description="Campaign budget name")],
+    daily_budget: Annotated[float, Field(description="Daily budget in account currency, e.g. INR")],
+    explicitly_shared: Annotated[bool, Field(description="Whether the budget can be shared by multiple campaigns")] = False,
+    validate_only: Annotated[bool, Field(description="Dry-run validate without applying")] = False,
+    force_create: Annotated[bool, Field(description="Create even if a budget with the same name exists")] = False,
+) -> str:
+    """Create a campaign budget."""
+    try:
+        if _mutations_disabled_by_env():
+            return "Mutations are disabled (GOOGLE_ADS_DISABLE_MUTATIONS=1)."
+        validate_only = _effective_validate_only(validate_only)
+        budget_name = (name or "").strip()
+        if not budget_name:
+            return "name is required."
+        if daily_budget <= 0:
+            return "daily_budget must be positive."
+
+        existing = None if force_create else _existing_budget_by_name(customer_id, budget_name)
+        if existing and not validate_only:
+            return _json_out({"status": "exists", "budget": existing})
+
+        op = {
+            "create": {
+                "name": budget_name,
+                "amountMicros": str(mh.currency_to_micros(daily_budget)),
+                "deliveryMethod": "STANDARD",
+                "explicitlyShared": bool(explicitly_shared),
+            }
+        }
+        data, err = mh._mutate_raw(
+            customer_id,
+            "campaignBudgets",
+            [op],
+            creds=get_credentials(),
+            validate_only=validate_only,
+        )
+        if err:
+            return f"Error creating campaign budget: {err}"
+        names = _extract_mutate_resource_names(data)
+        return _json_out(
+            {
+                "status": "validated" if validate_only else "created",
+                "customer_id": format_customer_id(customer_id),
+                "budget_name": budget_name,
+                "daily_budget": daily_budget,
+                "amount_micros": mh.currency_to_micros(daily_budget),
+                "resource_name": names[0] if names else None,
+                "mutate": mh.format_mutate_results(data),
+            }
+        )
+    except Exception as e:
+        logger.exception("create_campaign_budget failed")
+        return f"Error creating campaign budget: {e}"
+
+
+@mcp.tool()
+async def create_search_campaign(
+    customer_id: Annotated[str, Field(description="Google Ads customer ID")],
+    name: Annotated[str, Field(description="Search campaign name")],
+    campaign_budget_resource_name: Annotated[
+        str,
+        Field(description="Campaign budget resource name, e.g. customers/123/campaignBudgets/456"),
+    ],
+    status: Annotated[str, Field(description="PAUSED or ENABLED; default PAUSED")] = "PAUSED",
+    bidding_strategy: Annotated[
+        str,
+        Field(description="MAXIMIZE_CLICKS, MANUAL_CPC, or MAXIMIZE_CONVERSIONS"),
+    ] = "MAXIMIZE_CLICKS",
+    cpc_bid_ceiling: Annotated[
+        Optional[float],
+        Field(description="Optional Max Clicks CPC ceiling in account currency"),
+    ] = None,
+    target_google_search: Annotated[bool, Field(description="Target Google Search")] = True,
+    target_search_partners: Annotated[bool, Field(description="Target Google Search Partners")] = False,
+    target_content_network: Annotated[bool, Field(description="Target Display/content network")] = False,
+    positive_geo_target_type: Annotated[str, Field(description="PRESENCE or PRESENCE_OR_INTEREST")] = "PRESENCE",
+    validate_only: Annotated[bool, Field(description="Dry-run validate without applying")] = False,
+    force_create: Annotated[bool, Field(description="Create even if a campaign with the same name exists")] = False,
+) -> str:
+    """Create a paused Search campaign linked to an existing campaign budget."""
+    try:
+        if _mutations_disabled_by_env():
+            return "Mutations are disabled (GOOGLE_ADS_DISABLE_MUTATIONS=1)."
+        validate_only = _effective_validate_only(validate_only)
+        campaign_name = (name or "").strip()
+        if not campaign_name:
+            return "name is required."
+        st = status.upper()
+        if st not in VALID_CAMPAIGN_STATUS:
+            return f"status must be one of: {', '.join(sorted(VALID_CAMPAIGN_STATUS))}"
+        strategy = bidding_strategy.upper().replace(" ", "_")
+        if strategy not in VALID_SEARCH_CAMPAIGN_BIDDING:
+            return f"bidding_strategy must be one of: {', '.join(sorted(VALID_SEARCH_CAMPAIGN_BIDDING))}"
+
+        existing = None if force_create else _existing_campaign_by_name(customer_id, campaign_name)
+        if existing and not validate_only:
+            return _json_out({"status": "exists", "campaign": existing})
+
+        campaign: Dict[str, Any] = {
+            "name": campaign_name,
+            "status": st,
+            "advertisingChannelType": "SEARCH",
+            "campaignBudget": campaign_budget_resource_name,
+            "networkSettings": {
+                "targetGoogleSearch": bool(target_google_search),
+                "targetSearchNetwork": bool(target_search_partners),
+                "targetContentNetwork": bool(target_content_network),
+                "targetPartnerSearchNetwork": bool(target_search_partners),
+            },
+            "geoTargetTypeSetting": {
+                "positiveGeoTargetType": positive_geo_target_type.upper(),
+                "negativeGeoTargetType": "PRESENCE_OR_INTEREST",
+            },
+        }
+        if strategy == "MAXIMIZE_CLICKS":
+            campaign["maximizeClicks"] = {}
+            if cpc_bid_ceiling is not None:
+                campaign["maximizeClicks"]["cpcBidCeilingMicros"] = str(mh.currency_to_micros(cpc_bid_ceiling))
+        elif strategy == "MANUAL_CPC":
+            campaign["manualCpc"] = {}
+        elif strategy == "MAXIMIZE_CONVERSIONS":
+            campaign["maximizeConversions"] = {}
+
+        data, err = mh._mutate_raw(
+            customer_id,
+            "campaigns",
+            [{"create": campaign}],
+            creds=get_credentials(),
+            validate_only=validate_only,
+        )
+        if err:
+            return f"Error creating search campaign: {err}"
+        names = _extract_mutate_resource_names(data)
+        return _json_out(
+            {
+                "status": "validated" if validate_only else "created",
+                "customer_id": format_customer_id(customer_id),
+                "campaign_name": campaign_name,
+                "resource_name": names[0] if names else None,
+                "campaign_id": _resource_id(names[0]) if names else None,
+                "mutate": mh.format_mutate_results(data),
+            }
+        )
+    except Exception as e:
+        logger.exception("create_search_campaign failed")
+        return f"Error creating search campaign: {e}"
+
+
+@mcp.tool()
+async def create_ad_groups(
+    customer_id: Annotated[str, Field(description="Google Ads customer ID")],
+    campaign_id: Annotated[str, Field(description="Campaign ID")],
+    ad_groups: Annotated[
+        List[Dict[str, Any]],
+        Field(description="List of {name, status?, cpc_bid?}; status defaults PAUSED"),
+    ],
+    validate_only: Annotated[bool, Field(description="Dry-run validate without applying")] = False,
+) -> str:
+    """Create ad groups under an existing campaign."""
+    try:
+        if _mutations_disabled_by_env():
+            return "Mutations are disabled (GOOGLE_ADS_DISABLE_MUTATIONS=1)."
+        validate_only = _effective_validate_only(validate_only)
+        if not ad_groups:
+            return "ad_groups list cannot be empty."
+        campaign_rn = mh.campaign_resource_name(customer_id, re.sub(r"\D", "", str(campaign_id)))
+        ops: List[Dict[str, Any]] = []
+        for ag in ad_groups:
+            name = str(ag.get("name") or "").strip()
+            if not name:
+                return "Each ad group requires name."
+            status = str(ag.get("status") or "PAUSED").upper()
+            if status not in VALID_AD_GROUP_STATUS:
+                return f"Invalid status for {name}: {status}"
+            create: Dict[str, Any] = {"name": name, "campaign": campaign_rn, "status": status, "type": "SEARCH_STANDARD"}
+            if ag.get("cpc_bid") is not None:
+                create["cpcBidMicros"] = str(mh.currency_to_micros(float(ag["cpc_bid"])))
+            ops.append({"create": create})
+
+        data, err = mh._mutate_raw(customer_id, "adGroups", ops, creds=get_credentials(), validate_only=validate_only)
+        if err:
+            return f"Error creating ad groups: {err}"
+        names = _extract_mutate_resource_names(data)
+        return _json_out(
+            {
+                "status": "validated" if validate_only else "created",
+                "created_count": len(ops),
+                "resource_names": names,
+                "ad_group_ids": [_resource_id(n) for n in names],
+                "mutate": mh.format_mutate_results(data),
+            }
+        )
+    except Exception as e:
+        logger.exception("create_ad_groups failed")
+        return f"Error creating ad groups: {e}"
+
+
+@mcp.tool()
+async def create_keywords(
+    customer_id: Annotated[str, Field(description="Google Ads customer ID")],
+    ad_group_id: Annotated[str, Field(description="Ad group ID")],
+    keywords: Annotated[
+        List[Dict[str, Any]],
+        Field(description="List of {text, match_type?, status?}; match_type defaults PHRASE, status defaults PAUSED"),
+    ],
+    validate_only: Annotated[bool, Field(description="Dry-run validate without applying")] = False,
+) -> str:
+    """Create positive keywords in an ad group."""
+    try:
+        if _mutations_disabled_by_env():
+            return "Mutations are disabled (GOOGLE_ADS_DISABLE_MUTATIONS=1)."
+        validate_only = _effective_validate_only(validate_only)
+        if not keywords:
+            return "keywords list cannot be empty."
+        ad_group_rn = mh.ad_group_resource_name(customer_id, re.sub(r"\D", "", str(ad_group_id)))
+        ops: List[Dict[str, Any]] = []
+        for kw in keywords:
+            text = str(kw.get("text") or "").strip()
+            if not text:
+                continue
+            status = str(kw.get("status") or "PAUSED").upper()
+            if status not in VALID_AD_GROUP_STATUS:
+                return f"Invalid keyword status for {text}: {status}"
+            ops.append(_keyword_op(ad_group_rn, text, str(kw.get("match_type") or "PHRASE"), status))
+        if not ops:
+            return "No valid keywords to create."
+
+        data, err = mh._mutate_raw(
+            customer_id,
+            "adGroupCriteria",
+            ops,
+            creds=get_credentials(),
+            validate_only=validate_only,
+            partial_failure=True,
+        )
+        if err:
+            return f"Error creating keywords: {err}"
+        return _json_out(
+            {
+                "status": "validated" if validate_only else "created",
+                "keyword_count": len(ops),
+                "mutate": mh.format_mutate_results(data),
+            }
+        )
+    except Exception as e:
+        logger.exception("create_keywords failed")
+        return f"Error creating keywords: {e}"
+
+
+@mcp.tool()
+async def create_responsive_search_ad(
+    customer_id: Annotated[str, Field(description="Google Ads customer ID")],
+    ad_group_id: Annotated[str, Field(description="Ad group ID")],
+    final_url: Annotated[str, Field(description="Final URL for the RSA")],
+    headlines: Annotated[List[str], Field(description="RSA headlines, 3-15 items")],
+    descriptions: Annotated[List[str], Field(description="RSA descriptions, 2-4 items")],
+    status: Annotated[str, Field(description="PAUSED or ENABLED; default PAUSED")] = "PAUSED",
+    validate_only: Annotated[bool, Field(description="Dry-run validate without applying")] = False,
+) -> str:
+    """Create a responsive search ad in an ad group."""
+    try:
+        if _mutations_disabled_by_env():
+            return "Mutations are disabled (GOOGLE_ADS_DISABLE_MUTATIONS=1)."
+        validate_only = _effective_validate_only(validate_only)
+        st = status.upper()
+        if st not in VALID_AD_GROUP_STATUS:
+            return f"status must be one of: {', '.join(sorted(VALID_AD_GROUP_STATUS))}"
+        clean_headlines = [h.strip() for h in headlines if h and h.strip()]
+        clean_descriptions = [d.strip() for d in descriptions if d and d.strip()]
+        if not (3 <= len(clean_headlines) <= 15):
+            return "Responsive search ads require 3 to 15 headlines."
+        if not (2 <= len(clean_descriptions) <= 4):
+            return "Responsive search ads require 2 to 4 descriptions."
+        if not final_url or not final_url.startswith(("http://", "https://")):
+            return "final_url must start with http:// or https://."
+
+        ad_group_rn = mh.ad_group_resource_name(customer_id, re.sub(r"\D", "", str(ad_group_id)))
+        op = _rsa_op(ad_group_rn, final_url, clean_headlines, clean_descriptions, st)
+        data, err = mh._mutate_raw(customer_id, "adGroupAds", [op], creds=get_credentials(), validate_only=validate_only)
+        if err:
+            return f"Error creating responsive search ad: {err}"
+        names = _extract_mutate_resource_names(data)
+        return _json_out(
+            {
+                "status": "validated" if validate_only else "created",
+                "resource_name": names[0] if names else None,
+                "mutate": mh.format_mutate_results(data),
+            }
+        )
+    except Exception as e:
+        logger.exception("create_responsive_search_ad failed")
+        return f"Error creating responsive search ad: {e}"
+
+
+@mcp.tool()
+async def create_campaign_location_targets(
+    customer_id: Annotated[str, Field(description="Google Ads customer ID")],
+    campaign_id: Annotated[str, Field(description="Campaign ID")],
+    geo_target_constant_ids: Annotated[
+        List[str],
+        Field(description="Geo target constant IDs, e.g. 2356 for India"),
+    ],
+    negative: Annotated[bool, Field(description="Create negative location criteria")] = False,
+    validate_only: Annotated[bool, Field(description="Dry-run validate without applying")] = False,
+) -> str:
+    """Create campaign-level location targets."""
+    try:
+        if _mutations_disabled_by_env():
+            return "Mutations are disabled (GOOGLE_ADS_DISABLE_MUTATIONS=1)."
+        validate_only = _effective_validate_only(validate_only)
+        campaign_rn = mh.campaign_resource_name(customer_id, re.sub(r"\D", "", str(campaign_id)))
+        ops: List[Dict[str, Any]] = []
+        for gid in geo_target_constant_ids:
+            digits = re.sub(r"\D", "", str(gid))
+            if not digits:
+                continue
+            ops.append(
+                {
+                    "create": {
+                        "campaign": campaign_rn,
+                        "negative": bool(negative),
+                        "location": {"geoTargetConstant": f"geoTargetConstants/{digits}"},
+                    }
+                }
+            )
+        if not ops:
+            return "geo_target_constant_ids must contain at least one valid ID."
+        data, err = mh._mutate_raw(customer_id, "campaignCriteria", ops, creds=get_credentials(), validate_only=validate_only)
+        if err:
+            return f"Error creating campaign location targets: {err}"
+        return _json_out(
+            {
+                "status": "validated" if validate_only else "created",
+                "location_count": len(ops),
+                "mutate": mh.format_mutate_results(data),
+            }
+        )
+    except Exception as e:
+        logger.exception("create_campaign_location_targets failed")
+        return f"Error creating campaign location targets: {e}"
+
+
+@mcp.tool()
+async def create_paused_search_campaign_build(
+    customer_id: Annotated[str, Field(description="Google Ads customer ID")],
+    campaign_name: Annotated[str, Field(description="Search campaign name")],
+    daily_budget: Annotated[float, Field(description="Daily budget in account currency")],
+    final_url: Annotated[str, Field(description="Final URL for all RSAs")],
+    ad_groups: Annotated[
+        List[Dict[str, Any]],
+        Field(
+            description=(
+                "List of ad groups: {name, keywords:[{text,match_type}], "
+                "headlines:[...], descriptions:[...]}"
+            )
+        ),
+    ],
+    negative_keywords: Annotated[List[str], Field(description="Campaign-level negative keyword texts")] = [],
+    geo_target_constant_ids: Annotated[List[str], Field(description="Geo target IDs; default empty")] = [],
+    validate_only: Annotated[bool, Field(description="Dry-run validate without applying")] = False,
+) -> str:
+    """
+    Create a complete paused Search build: budget, campaign, optional locations,
+    ad groups, keywords, one RSA per ad group, and campaign negatives.
+    """
+    try:
+        if _mutations_disabled_by_env():
+            return "Mutations are disabled (GOOGLE_ADS_DISABLE_MUTATIONS=1)."
+        validate_only = _effective_validate_only(validate_only)
+        if not ad_groups:
+            return "ad_groups list cannot be empty."
+        if not final_url.startswith(("http://", "https://")):
+            return "final_url must start with http:// or https://."
+
+        creds = get_credentials()
+        fid = format_customer_id(customer_id)
+        budget_name = f"{campaign_name} Budget"
+        budget_rn = f"customers/{fid}/campaignBudgets/-1"
+        campaign_rn = f"customers/{fid}/campaigns/-2"
+        results: Dict[str, Any] = {
+            "status": "validated" if validate_only else "created",
+            "customer_id": fid,
+            "campaign_name": campaign_name,
+            "operation_counts": {},
+        }
+
+        operations: List[Dict[str, Any]] = [
+            {
+                "campaignBudgetOperation": {
+                    "create": {
+                        "resourceName": budget_rn,
+                        "name": budget_name,
+                        "amountMicros": str(mh.currency_to_micros(daily_budget)),
+                        "deliveryMethod": "STANDARD",
+                        "explicitlyShared": False,
+                    }
+                }
+            },
+            {
+                "campaignOperation": {
+                    "create": {
+                        "resourceName": campaign_rn,
+                        "name": campaign_name,
+                        "status": "PAUSED",
+                        "advertisingChannelType": "SEARCH",
+                        "campaignBudget": budget_rn,
+                        "networkSettings": {
+                            "targetGoogleSearch": True,
+                            "targetSearchNetwork": False,
+                            "targetContentNetwork": False,
+                            "targetPartnerSearchNetwork": False,
+                        },
+                        "geoTargetTypeSetting": {
+                            "positiveGeoTargetType": "PRESENCE",
+                            "negativeGeoTargetType": "PRESENCE_OR_INTEREST",
+                        },
+                        "maximizeClicks": {},
+                    }
+                }
+            },
+        ]
+        results["operation_counts"]["campaign_budgets"] = 1
+        results["operation_counts"]["campaigns"] = 1
+
+        if geo_target_constant_ids:
+            location_count = 0
+            for gid in geo_target_constant_ids:
+                geo_id = re.sub(r"\D", "", str(gid))
+                if not geo_id:
+                    continue
+                operations.append(
+                    {
+                        "campaignCriterionOperation": {
+                            "create": {
+                                "campaign": campaign_rn,
+                                "location": {"geoTargetConstant": f"geoTargetConstants/{geo_id}"},
+                            }
+                        }
+                    }
+                )
+                location_count += 1
+            results["operation_counts"]["location_targets"] = location_count
+
+        keyword_count = 0
+        rsa_count = 0
+        for idx, ag in enumerate(ad_groups):
+            ag_name = str(ag.get("name") or "").strip()
+            if not ag_name:
+                return "Each ad group requires name."
+            ag_rn = f"customers/{fid}/adGroups/-{idx + 10}"
+            operations.append(
+                {
+                    "adGroupOperation": {
+                        "create": {
+                            "resourceName": ag_rn,
+                            "name": ag_name,
+                            "campaign": campaign_rn,
+                            "status": "PAUSED",
+                            "type": "SEARCH_STANDARD",
+                        }
+                    }
+                }
+            )
+
+            for kw in ag.get("keywords") or []:
+                text = str(kw.get("text") if isinstance(kw, dict) else kw).strip()
+                if text:
+                    mt = str((kw.get("match_type") if isinstance(kw, dict) else "PHRASE") or "PHRASE")
+                    operations.append({"adGroupCriterionOperation": _keyword_op(ag_rn, text, mt, "PAUSED")})
+                    keyword_count += 1
+
+            headlines = [str(h) for h in ag.get("headlines") or []]
+            descriptions = [str(d) for d in ag.get("descriptions") or []]
+            if headlines or descriptions:
+                if not (3 <= len([h for h in headlines if h.strip()]) <= 15):
+                    return f"Ad group {ag.get('name')} RSA requires 3 to 15 headlines."
+                if not (2 <= len([d for d in descriptions if d.strip()]) <= 4):
+                    return f"Ad group {ag.get('name')} RSA requires 2 to 4 descriptions."
+                operations.append({"adGroupAdOperation": _rsa_op(ag_rn, final_url, headlines, descriptions, "PAUSED")})
+                rsa_count += 1
+
+        results["operation_counts"]["ad_groups"] = len(ad_groups)
+        results["operation_counts"]["keywords"] = keyword_count
+        results["operation_counts"]["rsas"] = rsa_count
+
+        if negative_keywords:
+            neg_ops, skipped, _resource = mh.build_negative_keyword_operations(
+                customer_id,
+                negative_keywords,
+                "campaign",
+                "2",
+                None,
+                "PHRASE",
+                set(),
+            )
+            for op in neg_ops:
+                op["create"]["campaign"] = campaign_rn
+                operations.append({"campaignCriterionOperation": op})
+            results["operation_counts"]["negative_keywords"] = len(neg_ops)
+            results["skipped_negative_keywords"] = skipped
+
+        data, err = mh.mutate_google_ads_operations(
+            customer_id,
+            operations,
+            creds=creds,
+            validate_only=validate_only,
+            partial_failure=False,
+        )
+        if err:
+            return f"Error creating paused search campaign build: {err}"
+
+        resource_names = _extract_mutate_resource_names(data)
+        results["operation_count"] = len(operations)
+        results["resource_names"] = resource_names
+        results["mutate"] = mh.format_mutate_results(data)
+
+        return _json_out(results)
+    except Exception as e:
+        logger.exception("create_paused_search_campaign_build failed")
+        return f"Error creating paused search campaign build: {e}"
 
 
 @mcp.tool()

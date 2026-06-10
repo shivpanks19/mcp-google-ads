@@ -139,6 +139,121 @@ class TestCampaignEditToolsValidation(unittest.TestCase):
         self.assertEqual(data["status"], "updated")
         self.assertEqual(data["new_status"], "PAUSED")
 
+    @patch.object(cet, "_existing_budget_by_name")
+    @patch.object(mh, "_mutate_raw")
+    @patch.object(cet, "get_credentials")
+    def test_create_campaign_budget_payload(self, _creds, mock_mutate, mock_existing) -> None:
+        mock_existing.return_value = None
+        mock_mutate.return_value = (
+            {"results": [{"resourceName": "customers/1234567890/campaignBudgets/77"}]},
+            None,
+        )
+        out = asyncio.run(
+            cet.create_campaign_budget(
+                customer_id="1234567890",
+                name="Launch Budget",
+                daily_budget=300,
+            )
+        )
+        data = json.loads(out)
+        self.assertEqual(data["status"], "created")
+        self.assertEqual(data["resource_name"], "customers/1234567890/campaignBudgets/77")
+        args, kwargs = mock_mutate.call_args
+        self.assertEqual(args[1], "campaignBudgets")
+        self.assertEqual(args[2][0]["create"]["amountMicros"], "300000000")
+
+    @patch.object(cet, "_existing_campaign_by_name")
+    @patch.object(mh, "_mutate_raw")
+    @patch.object(cet, "get_credentials")
+    def test_create_search_campaign_payload_paused(self, _creds, mock_mutate, mock_existing) -> None:
+        mock_existing.return_value = None
+        mock_mutate.return_value = (
+            {"results": [{"resourceName": "customers/1234567890/campaigns/88"}]},
+            None,
+        )
+        out = asyncio.run(
+            cet.create_search_campaign(
+                customer_id="1234567890",
+                name="S_Test_Search",
+                campaign_budget_resource_name="customers/1234567890/campaignBudgets/77",
+            )
+        )
+        data = json.loads(out)
+        self.assertEqual(data["campaign_id"], "88")
+        args, kwargs = mock_mutate.call_args
+        create = args[2][0]["create"]
+        self.assertEqual(args[1], "campaigns")
+        self.assertEqual(create["status"], "PAUSED")
+        self.assertEqual(create["advertisingChannelType"], "SEARCH")
+        self.assertFalse(create["networkSettings"]["targetPartnerSearchNetwork"])
+        self.assertEqual(create["geoTargetTypeSetting"]["positiveGeoTargetType"], "PRESENCE")
+
+    @patch.object(mh, "_mutate_raw")
+    @patch.object(cet, "get_credentials")
+    def test_create_responsive_search_ad_validation_and_payload(self, _creds, mock_mutate) -> None:
+        mock_mutate.return_value = (
+            {"results": [{"resourceName": "customers/1234567890/adGroupAds/11~22"}]},
+            None,
+        )
+        out = asyncio.run(
+            cet.create_responsive_search_ad(
+                customer_id="1234567890",
+                ad_group_id="11",
+                final_url="https://example.com/",
+                headlines=["One", "Two", "Three"],
+                descriptions=["Desc one", "Desc two"],
+            )
+        )
+        data = json.loads(out)
+        self.assertEqual(data["resource_name"], "customers/1234567890/adGroupAds/11~22")
+        args, kwargs = mock_mutate.call_args
+        create = args[2][0]["create"]
+        self.assertEqual(args[1], "adGroupAds")
+        self.assertEqual(create["status"], "PAUSED")
+        self.assertEqual(create["ad"]["finalUrls"], ["https://example.com/"])
+        self.assertEqual(len(create["ad"]["responsiveSearchAd"]["headlines"]), 3)
+
+    @patch.object(mh, "mutate_google_ads_operations")
+    @patch.object(cet, "get_credentials")
+    def test_create_paused_search_campaign_build_uses_google_ads_mutate(self, _creds, mock_mutate) -> None:
+        mock_mutate.return_value = (
+            {
+                "results": [
+                    {"resourceName": "customers/1234567890/campaignBudgets/77"},
+                    {"resourceName": "customers/1234567890/campaigns/88"},
+                ]
+            },
+            None,
+        )
+        out = asyncio.run(
+            cet.create_paused_search_campaign_build(
+                customer_id="1234567890",
+                campaign_name="S_Test_Search",
+                daily_budget=300,
+                final_url="https://example.com/",
+                geo_target_constant_ids=["2356"],
+                negative_keywords=["free"],
+                ad_groups=[
+                    {
+                        "name": "AG_Test",
+                        "keywords": [{"text": "ptz camera", "match_type": "EXACT"}],
+                        "headlines": ["One", "Two", "Three"],
+                        "descriptions": ["Desc one", "Desc two"],
+                    }
+                ],
+                validate_only=True,
+            )
+        )
+        data = json.loads(out)
+        self.assertEqual(data["status"], "validated")
+        args, kwargs = mock_mutate.call_args
+        self.assertTrue(kwargs["validate_only"])
+        operations = args[1]
+        self.assertEqual(operations[0]["campaignBudgetOperation"]["create"]["resourceName"], "customers/1234567890/campaignBudgets/-1")
+        self.assertEqual(operations[1]["campaignOperation"]["create"]["campaignBudget"], "customers/1234567890/campaignBudgets/-1")
+        self.assertTrue(any("adGroupCriterionOperation" in op for op in operations))
+        self.assertTrue(any("adGroupAdOperation" in op for op in operations))
+
 
 class TestOptimizationActions(unittest.TestCase):
     def test_campaign_metrics_aggregate(self) -> None:
