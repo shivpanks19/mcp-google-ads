@@ -27,6 +27,10 @@ This document describes what the **Google Ads MCP** exposes: there is no separat
 | `generate_keyword_ideas` | **Keyword Planner:** discover ideas from seed keywords, a page URL, or a site; returns volume, competition, CPC ranges. |
 | `get_keyword_metrics` | **Keyword Planner:** historical metrics for an explicit keyword list (search volume, competition, bids). |
 | `suggest_geo_targets` | Resolve location names (e.g. India, Mumbai) to `geoTargetConstants/…` resource names. |
+| `get_search_term_insights` | **PPC manager:** read-only search-term mining; returns waste terms for negatives and converting queries to promote as keywords. |
+| `get_keyword_performance` | **PPC manager:** read-only keyword triage; flags zero-conversion spenders, high-CPA keywords, winners, and low-CTR terms. |
+| `plan_weekly_performance_actions` | **PPC manager:** read-only weekly action plan combining campaign, search-term, and keyword signals before applying edits. |
+| `update_keyword_status` | **Mutate (write):** enable, pause, or remove one keyword criterion by `ad_group_id` + `criterion_id`. Supports `validate_only`. |
 | `update_search_campaign` | **Mutate (write):** sparse update of an existing **SEARCH** campaign via REST `campaigns:mutate` — **`status`** (ENABLED/PAUSED) and/or **`name`**. Pre-checks channel type with GAQL. Supports **`validate_only`**. |
 | `update_search_campaign_budget_micros` | **Mutate (write):** set the linked **CampaignBudget** daily **`amountMicros`** for a **SEARCH** campaign via REST `campaignBudgets:mutate`. Same guards as `update_search_campaign`. |
 
@@ -84,6 +88,8 @@ Registered from `campaign_edit_tools.py` and `optimization_actions.py` (imported
 | Tool | Purpose |
 |------|---------|
 | `bulk_update_campaigns` | Batch status / budget / target CPA updates for multiple campaigns. |
+| `plan_weekly_performance_actions` | **Read-only preview:** campaign pause/budget candidates, negative keyword candidates, positive keyword expansion candidates, and exact apply-tool hints. |
+| `update_keyword_status` | Apply keyword-level pruning decisions returned by `get_keyword_performance` / `plan_weekly_performance_actions`. |
 | `apply_weekly_performance_actions` | **Flagship PM workflow:** classify campaigns (pause waste, reduce/increase budget, optional search-term negatives) and **apply directly**; optional Supabase `save_memory` audit when configured. |
 | `analyze_and_apply_campaign_edits` | Apply an explicit action list after human/agent review of analysis output. |
 
@@ -93,12 +99,13 @@ Copy-paste CLI examples: [`campaign-edit-examples.md`](campaign-edit-examples.md
 
 1. `list_accounts` → pick `customer_id`.
 2. `get_campaign_performance(customer_id, days=7)` — baseline metrics.
-3. `analyze_running_campaigns_and_ads(customer_id, campaign_days=7, ad_days=7)` — Markdown brief with heuristic next steps.
-4. **`get_campaign_settings`** on campaigns you plan to change (confirm budget, bidding, shared budget).
-5. Either:
+3. `plan_weekly_performance_actions(customer_id, days=7)` — read-only action plan with campaign, query, and keyword candidates.
+4. `analyze_running_campaigns_and_ads(customer_id, campaign_days=7, ad_days=7)` — Markdown brief with heuristic next steps.
+5. **`get_campaign_settings`** on campaigns you plan to change (confirm budget, bidding, shared budget).
+6. Either:
    - **`apply_weekly_performance_actions`** with thresholds (`min_spend_inr`, `pause_zero_conversion_spenders`, etc.), or
-   - Surgical edits: **`update_campaign_status`**, **`update_campaign_budget`**, **`add_negative_keywords`**, **`add_campaign_negative_keywords_from_search_terms`**.
-6. Optional: **`save_analysis_text_snapshot`** (narrative) and rely on auto **`save_memory`** from weekly apply when Supabase is configured.
+   - Surgical edits: **`update_campaign_status`**, **`update_campaign_budget`**, **`update_keyword_status`**, **`add_negative_keywords`**, **`add_campaign_negative_keywords_from_search_terms`**.
+7. Optional: **`save_analysis_text_snapshot`** (narrative) and rely on auto **`save_memory`** from weekly apply when Supabase is configured.
 
 **Important:** Mutations are live. Test on a non-production account or use conservative thresholds first.
 
@@ -120,7 +127,8 @@ GAQL cannot generate new keyword ideas or return Planner search volumes for seed
 2. **`suggest_geo_targets`** → confirm `geoTargetConstants/2356` (India) or city-level targets (e.g. Mumbai).
 3. **`generate_keyword_ideas`** with seed keywords + geo + language (default India + English).
 4. **`get_keyword_metrics`** to refresh volumes on a shortlisted keyword list.
-5. **(Post-launch)** **`run_gaql`** on `search_term_view` for live query optimization.
+5. **(Post-launch)** **`get_search_term_insights`** for live query optimization and expansion candidates.
+6. **`get_keyword_performance`** for pruning zero-conversion spenders and protecting winners.
 
 Copy-paste CLI examples: [`keyword-plan-examples.md`](keyword-plan-examples.md).
 

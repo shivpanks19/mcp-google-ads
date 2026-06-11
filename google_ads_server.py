@@ -2171,6 +2171,7 @@ import analysis_tools  # noqa: E402, F401
 import keyword_plan_tools  # noqa: E402, F401
 import campaign_edit_tools  # noqa: E402, F401
 import optimization_actions  # noqa: E402, F401
+import ppc_manager_tools  # noqa: E402, F401
 import sheets_tools  # noqa: E402, F401
 
 if __name__ == "__main__":
