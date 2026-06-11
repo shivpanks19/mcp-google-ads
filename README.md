@@ -151,7 +151,7 @@ When `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are set, the agent can **exp
 
 ### Deploy on Render (remote MCP)
 
-See **[docs/render-deploy.md](docs/render-deploy.md)** for Web Service settings, env vars, and Cursor URL (`https://YOUR-SERVICE.onrender.com/mcp`).
+See **[docs/render-deploy.md](docs/render-deploy.md)** for Web Service settings, env vars, and the authenticated Cursor URL (`https://YOUR-SERVICE.onrender.com/mcp?token=...`). Set `MCP_URL_AUTH_TOKEN` on the host to protect the remote MCP endpoint.
 
 **Typical agent workflow:** `list_accounts` → `save_client_context` with aliases → analyze with GAQL → `save_memory` / `save_report_snapshot` / `save_analysis_text_snapshot` → next session: `recall_client_context` + `list_report_snapshots` / `list_analysis_text_snapshots`.
 

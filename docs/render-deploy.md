@@ -66,6 +66,7 @@ In **Environment** → **Add Environment Variable**, set:
 | `GOOGLE_ADS_AUTH_TYPE` | `service_account` |
 | `GOOGLE_ADS_DEVELOPER_TOKEN` | Your developer token |
 | `GOOGLE_ADS_CREDENTIALS_JSON` | **Entire** service account key JSON on **one line** |
+| `MCP_URL_AUTH_TOKEN` | Secret token required in the hosted MCP URL |
 
 **`GOOGLE_ADS_CREDENTIALS_JSON` example (format only — use your real key):**
 
@@ -107,7 +108,14 @@ curl https://YOUR-SERVICE.onrender.com/
 MCP URL for Cursor remote MCP:
 
 ```text
-https://YOUR-SERVICE.onrender.com/mcp
+https://YOUR-SERVICE.onrender.com/mcp?token=YOUR_MCP_URL_AUTH_TOKEN
+```
+
+If your MCP client does not preserve query strings reliably, use the path-token
+form instead:
+
+```text
+https://YOUR-SERVICE.onrender.com/YOUR_MCP_URL_AUTH_TOKEN/mcp
 ```
 
 ---
@@ -128,22 +136,22 @@ In Cursor MCP settings (remote / HTTP):
 {
   "mcpServers": {
     "google-ads-render": {
-      "url": "https://YOUR-SERVICE.onrender.com/mcp"
+      "url": "https://YOUR-SERVICE.onrender.com/mcp?token=YOUR_MCP_URL_AUTH_TOKEN"
     }
   }
 }
 ```
 
-Exact JSON shape depends on your Cursor version; use the deployed **`/mcp`** URL.
+Exact JSON shape depends on your Cursor version; use the deployed authenticated **`/mcp`** URL.
 
 ---
 
 ## Security notes
 
-- The service is **public** unless you add auth in front of it (Render private networking, API gateway, or FastMCP auth).
+- Set `MCP_URL_AUTH_TOKEN` as a Render **Secret**. When it is set, `/mcp` rejects requests without the matching URL token; `/` and `/health` remain public for discovery and health checks.
 - Never commit `.env`, `credentials.json`, or service account keys to Git.
 - Use Render **Secret** type for tokens and JSON keys.
-- Restrict who can use the Render URL; it can call Google Ads with your service account permissions.
+- Restrict who can see the authenticated Render URL; it can call Google Ads with your service account permissions.
 - **Campaign edit tools** (`update_campaign_status`, `apply_weekly_performance_actions`, etc.) work on Render the same as locally, but only if the service account has **edit** access on the target accounts. Read-only invites will fail mutate calls with permission errors.
 
 ---
