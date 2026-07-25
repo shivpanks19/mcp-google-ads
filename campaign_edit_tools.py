@@ -28,8 +28,72 @@ VALID_BIDDING_STRATEGIES = frozenset(
         "TARGET_CPA",
         "TARGET_ROAS",
         "MANUAL_CPC",
+        "MAXIMIZE_CLICKS",
+        "TARGET_SPEND",
     }
 )
+
+
+def _normalize_bidding_strategy(strategy: str) -> str:
+    strat = (strategy or "").upper().replace(" ", "_")
+    if strat in ("MAXIMIZE_CLICKS", "TARGET_SPEND"):
+        return "TARGET_SPEND"
+    return strat
+
+
+def _bidding_update_fields(
+    strategy: str,
+    *,
+    target_cpa: Optional[float] = None,
+    target_roas: Optional[float] = None,
+    cpc_bid_ceiling: Optional[float] = None,
+) -> tuple[Dict[str, Any], List[str]]:
+    """Build campaign mutate fields/mask for a bidding strategy switch."""
+    strat = _normalize_bidding_strategy(strategy)
+    update_fields: Dict[str, Any] = {}
+    mask: List[str] = []
+
+    if strat == "MANUAL_CPC":
+        update_fields["manualCpc"] = {"enhancedCpcEnabled": False}
+        mask = ["manual_cpc.enhanced_cpc_enabled"]
+    elif strat == "TARGET_SPEND":
+        update_fields["targetSpend"] = {}
+        mask = ["target_spend"]
+        if cpc_bid_ceiling is not None:
+            update_fields["targetSpend"] = {
+                "cpcBidCeilingMicros": str(mh.currency_to_micros(cpc_bid_ceiling))
+            }
+            mask = ["target_spend.cpc_bid_ceiling_micros"]
+    elif strat == "MAXIMIZE_CONVERSIONS":
+        update_fields["maximizeConversions"] = {}
+        mask = ["maximize_conversions"]
+        if target_cpa is not None:
+            update_fields["maximizeConversions"] = {
+                "targetCpaMicros": str(mh.currency_to_micros(target_cpa))
+            }
+            mask = ["maximize_conversions.target_cpa_micros"]
+    elif strat == "TARGET_CPA":
+        if target_cpa is None:
+            raise ValueError("target_cpa is required for TARGET_CPA strategy.")
+        update_fields["targetCpa"] = {"targetCpaMicros": str(mh.currency_to_micros(target_cpa))}
+        mask = ["target_cpa.target_cpa_micros"]
+    elif strat == "TARGET_ROAS":
+        if target_roas is None:
+            raise ValueError("target_roas is required for TARGET_ROAS strategy.")
+        update_fields["targetRoas"] = {"targetRoas": float(target_roas)}
+        mask = ["target_roas.target_roas"]
+    elif strat == "MAXIMIZE_CONVERSION_VALUE":
+        update_fields["maximizeConversionValue"] = {}
+        mask = ["maximize_conversion_value"]
+        if target_roas is not None:
+            update_fields["maximizeConversionValue"] = {"targetRoas": float(target_roas)}
+            mask = ["maximize_conversion_value.target_roas"]
+    else:
+        raise ValueError(
+            f"strategy must be one of: {', '.join(sorted(VALID_BIDDING_STRATEGIES))}"
+        )
+
+    return update_fields, mask
 
 
 def _json_out(data: Any) -> str:
@@ -329,13 +393,16 @@ async def create_search_campaign(
             },
             "geoTargetTypeSetting": {
                 "positiveGeoTargetType": positive_geo_target_type.upper(),
-                "negativeGeoTargetType": "PRESENCE_OR_INTEREST",
+                "negativeGeoTargetType": "PRESENCE",
             },
+            "containsEuPoliticalAdvertising": "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
         }
         if strategy == "MAXIMIZE_CLICKS":
-            campaign["maximizeClicks"] = {}
+            campaign["targetSpend"] = {}
             if cpc_bid_ceiling is not None:
-                campaign["maximizeClicks"]["cpcBidCeilingMicros"] = str(mh.currency_to_micros(cpc_bid_ceiling))
+                campaign["targetSpend"]["cpcBidCeilingMicros"] = str(
+                    mh.currency_to_micros(cpc_bid_ceiling)
+                )
         elif strategy == "MANUAL_CPC":
             campaign["manualCpc"] = {}
         elif strategy == "MAXIMIZE_CONVERSIONS":
@@ -577,6 +644,10 @@ async def create_paused_search_campaign_build(
     ],
     negative_keywords: Annotated[List[str], Field(description="Campaign-level negative keyword texts")] = [],
     geo_target_constant_ids: Annotated[List[str], Field(description="Geo target IDs; default empty")] = [],
+    campaign_budget_resource_name: Annotated[
+        Optional[str],
+        Field(description="Reuse an existing campaign budget resource name; skips budget create"),
+    ] = None,
     validate_only: Annotated[bool, Field(description="Dry-run validate without applying")] = False,
 ) -> str:
     """
@@ -595,27 +666,40 @@ async def create_paused_search_campaign_build(
         creds = get_credentials()
         fid = format_customer_id(customer_id)
         budget_name = f"{campaign_name} Budget"
-        budget_rn = f"customers/{fid}/campaignBudgets/-1"
+        existing_budget_rn = (campaign_budget_resource_name or "").strip()
+        if existing_budget_rn:
+            budget_rn = existing_budget_rn
+        else:
+            budget_rn = f"customers/{fid}/campaignBudgets/-1"
         campaign_rn = f"customers/{fid}/campaigns/-2"
         results: Dict[str, Any] = {
             "status": "validated" if validate_only else "created",
             "customer_id": fid,
             "campaign_name": campaign_name,
             "operation_counts": {},
+            "campaign_budget_resource_name": budget_rn,
         }
 
-        operations: List[Dict[str, Any]] = [
-            {
-                "campaignBudgetOperation": {
-                    "create": {
-                        "resourceName": budget_rn,
-                        "name": budget_name,
-                        "amountMicros": str(mh.currency_to_micros(daily_budget)),
-                        "deliveryMethod": "STANDARD",
-                        "explicitlyShared": False,
+        operations: List[Dict[str, Any]] = []
+        if not existing_budget_rn:
+            operations.append(
+                {
+                    "campaignBudgetOperation": {
+                        "create": {
+                            "resourceName": budget_rn,
+                            "name": budget_name,
+                            "amountMicros": str(mh.currency_to_micros(daily_budget)),
+                            "deliveryMethod": "STANDARD",
+                            "explicitlyShared": False,
+                        }
                     }
                 }
-            },
+            )
+            results["operation_counts"]["campaign_budgets"] = 1
+        else:
+            results["operation_counts"]["campaign_budgets"] = 0
+
+        operations.append(
             {
                 "campaignOperation": {
                     "create": {
@@ -631,15 +715,15 @@ async def create_paused_search_campaign_build(
                             "targetPartnerSearchNetwork": False,
                         },
                         "geoTargetTypeSetting": {
-                            "positiveGeoTargetType": "PRESENCE",
-                            "negativeGeoTargetType": "PRESENCE_OR_INTEREST",
+                            "positiveGeoTargetType": "PRESENCE_OR_INTEREST",
+                            "negativeGeoTargetType": "PRESENCE",
                         },
-                        "maximizeClicks": {},
+                        "containsEuPoliticalAdvertising": "DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING",
+                        "manualCpc": {},
                     }
                 }
-            },
-        ]
-        results["operation_counts"]["campaign_budgets"] = 1
+            }
+        )
         results["operation_counts"]["campaigns"] = 1
 
         if geo_target_constant_ids:
@@ -832,18 +916,25 @@ async def update_campaign_bidding(
     strategy: Annotated[
         str,
         Field(
-            description="MAXIMIZE_CONVERSIONS, MAXIMIZE_CONVERSION_VALUE, TARGET_CPA, TARGET_ROAS, or MANUAL_CPC"
+            description=(
+                "MAXIMIZE_CLICKS (or TARGET_SPEND), MANUAL_CPC, MAXIMIZE_CONVERSIONS, "
+                "MAXIMIZE_CONVERSION_VALUE, TARGET_CPA, or TARGET_ROAS"
+            )
         ),
     ],
     target_cpa: Annotated[
         Optional[float], Field(description="Target CPA in account currency (for TARGET_CPA / MAXIMIZE_CONVERSIONS)")
     ] = None,
     target_roas: Annotated[Optional[float], Field(description="Target ROAS (for TARGET_ROAS / MAXIMIZE_CONVERSION_VALUE)")] = None,
+    cpc_bid_ceiling: Annotated[
+        Optional[float],
+        Field(description="Max CPC bid ceiling in account currency (for MAXIMIZE_CLICKS / TARGET_SPEND)"),
+    ] = None,
 ) -> str:
     """Update campaign bidding strategy (Search campaigns; limited support for other channel types)."""
     try:
-        strat = strategy.upper().replace(" ", "_")
-        if strat not in VALID_BIDDING_STRATEGIES:
+        strat = _normalize_bidding_strategy(strategy)
+        if strat not in VALID_BIDDING_STRATEGIES and strategy.upper().replace(" ", "_") not in VALID_BIDDING_STRATEGIES:
             return f"strategy must be one of: {', '.join(sorted(VALID_BIDDING_STRATEGIES))}"
 
         camp, err = mh.resolve_campaign(customer_id, campaign_id=campaign_id)
@@ -854,41 +945,15 @@ async def update_campaign_bidding(
         if channel and channel not in ("SEARCH", "SHOPPING", "PERFORMANCE_MAX", "UNKNOWN", ""):
             return f"Bidding updates for channel type {channel} may fail; test on a single campaign first."
 
-        update_fields: Dict[str, Any] = {}
-        mask: List[str] = []
-
-        if strat == "MANUAL_CPC":
-            update_fields["manualCpc"] = {}
-            update_fields["biddingStrategyType"] = "MANUAL_CPC"
-            mask = ["manualCpc", "biddingStrategyType"]
-        elif strat == "MAXIMIZE_CONVERSIONS":
-            update_fields["biddingStrategyType"] = "MAXIMIZE_CONVERSIONS"
-            update_fields["maximizeConversions"] = {}
-            mask = ["biddingStrategyType", "maximizeConversions"]
-            if target_cpa is not None:
-                update_fields["maximizeConversions"] = {
-                    "targetCpaMicros": str(mh.currency_to_micros(target_cpa))
-                }
-                mask.append("maximizeConversions.targetCpaMicros")
-        elif strat == "TARGET_CPA":
-            if target_cpa is None:
-                return "target_cpa is required for TARGET_CPA strategy."
-            update_fields["biddingStrategyType"] = "TARGET_CPA"
-            update_fields["targetCpa"] = {"targetCpaMicros": str(mh.currency_to_micros(target_cpa))}
-            mask = ["biddingStrategyType", "targetCpa"]
-        elif strat == "TARGET_ROAS":
-            if target_roas is None:
-                return "target_roas is required for TARGET_ROAS strategy."
-            update_fields["biddingStrategyType"] = "TARGET_ROAS"
-            update_fields["targetRoas"] = {"targetRoas": float(target_roas)}
-            mask = ["biddingStrategyType", "targetRoas"]
-        elif strat == "MAXIMIZE_CONVERSION_VALUE":
-            update_fields["biddingStrategyType"] = "MAXIMIZE_CONVERSION_VALUE"
-            update_fields["maximizeConversionValue"] = {}
-            mask = ["biddingStrategyType", "maximizeConversionValue"]
-            if target_roas is not None:
-                update_fields["maximizeConversionValue"] = {"targetRoas": float(target_roas)}
-                mask.append("maximizeConversionValue.targetRoas")
+        try:
+            update_fields, mask = _bidding_update_fields(
+                strategy,
+                target_cpa=target_cpa,
+                target_roas=target_roas,
+                cpc_bid_ceiling=cpc_bid_ceiling,
+            )
+        except ValueError as exc:
+            return str(exc)
 
         creds = get_credentials()
         data, m_err = mh.mutate_campaign_update(
@@ -905,11 +970,50 @@ async def update_campaign_bidding(
                 "strategy": strat,
                 "target_cpa": target_cpa,
                 "target_roas": target_roas,
+                "cpc_bid_ceiling": cpc_bid_ceiling,
                 "mutate": mh.format_mutate_results(data),
             }
         )
     except Exception as e:
         return f"Error updating bidding: {e}"
+
+
+@mcp.tool()
+async def update_ad_group_cpc_bid(
+    customer_id: Annotated[str, Field(description="Google Ads customer ID")],
+    ad_group_id: Annotated[str, Field(description="Ad group ID")],
+    cpc_bid: Annotated[float, Field(description="Default CPC bid in account currency")],
+) -> str:
+    """Set ad group default CPC bid (useful after switching to MANUAL_CPC)."""
+    try:
+        ag, err = mh.resolve_ad_group(customer_id, ad_group_id=ad_group_id)
+        if err or not ag:
+            return err or "Ad group not found."
+
+        amount_micros = str(mh.currency_to_micros(cpc_bid))
+        op = {
+            "updateMask": "cpcBidMicros",
+            "update": {
+                "resourceName": ag["resource_name"],
+                "cpcBidMicros": amount_micros,
+            },
+        }
+        creds = get_credentials()
+        data, m_err = mh._mutate_raw(customer_id, "adGroups", [op], creds=creds)
+        if m_err:
+            return f"Error updating ad group CPC bid: {m_err}"
+
+        return _json_out(
+            {
+                "status": "updated",
+                "ad_group_id": ag["id"],
+                "ad_group_name": ag["name"],
+                "cpc_bid": cpc_bid,
+                "mutate": mh.format_mutate_results(data),
+            }
+        )
+    except Exception as e:
+        return f"Error updating ad group CPC bid: {e}"
 
 
 @mcp.tool()
@@ -1170,30 +1274,42 @@ async def bulk_update_campaigns(
                         entry["mutate"] = mh.format_mutate_results(data)
                     results.append(entry)
 
-            if op.get("strategy") or op.get("target_cpa") is not None:
-                strat = str(op.get("strategy") or "MAXIMIZE_CONVERSIONS").upper()
+            if op.get("strategy") or op.get("target_cpa") is not None or op.get("cpc_bid_ceiling") is not None:
+                strat = str(op.get("strategy") or "MAXIMIZE_CONVERSIONS")
                 tcpa = op.get("target_cpa")
-                update_fields: Dict[str, Any] = {"biddingStrategyType": strat}
-                mask = ["biddingStrategyType"]
-                if strat == "MAXIMIZE_CONVERSIONS" and tcpa is not None:
-                    update_fields["maximizeConversions"] = {
-                        "targetCpaMicros": str(mh.currency_to_micros(float(tcpa)))
-                    }
-                    mask.extend(["maximizeConversions", "maximizeConversions.targetCpaMicros"])
-                elif strat == "TARGET_CPA" and tcpa is not None:
-                    update_fields["targetCpa"] = {"targetCpaMicros": str(mh.currency_to_micros(float(tcpa)))}
-                    mask.append("targetCpa")
-                data, m_err = mh.mutate_campaign_update(customer_id, cid, update_fields, mask, creds=creds)
-                results.append(
-                    {
-                        "campaign_id": cid,
-                        "action": "bidding",
-                        "strategy": strat,
-                        "ok": not m_err,
-                        "error": m_err,
-                        "mutate": mh.format_mutate_results(data) if data else None,
-                    }
-                )
+                troas = op.get("target_roas")
+                cpc_ceiling = op.get("cpc_bid_ceiling")
+                try:
+                    update_fields, mask = _bidding_update_fields(
+                        strat,
+                        target_cpa=float(tcpa) if tcpa is not None else None,
+                        target_roas=float(troas) if troas is not None else None,
+                        cpc_bid_ceiling=float(cpc_ceiling) if cpc_ceiling is not None else None,
+                    )
+                    data, m_err = mh.mutate_campaign_update(
+                        customer_id, cid, update_fields, mask, creds=creds
+                    )
+                    results.append(
+                        {
+                            "campaign_id": cid,
+                            "action": "bidding",
+                            "strategy": _normalize_bidding_strategy(strat),
+                            "ok": not m_err,
+                            "error": m_err,
+                            "mutate": mh.format_mutate_results(data) if data else None,
+                        }
+                    )
+                except ValueError as exc:
+                    results.append(
+                        {
+                            "campaign_id": cid,
+                            "action": "bidding",
+                            "strategy": strat,
+                            "ok": False,
+                            "error": str(exc),
+                            "mutate": None,
+                        }
+                    )
 
         if status_ops:
             data, m_err = mh._mutate_raw(customer_id, "campaigns", status_ops, creds=creds)
