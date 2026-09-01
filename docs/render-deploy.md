@@ -23,6 +23,17 @@ GSC uses **`webmasters.readonly`** scope by default on the same service account 
 
 **Search Console MCP tools:** `list_search_console_sites`, `get_search_console_analytics`, `get_search_console_page_query_map`, `inspect_search_console_url`, `list_search_console_sitemaps`.
 
+### Google Analytics 4 setup
+
+1. GCP Console → same project as `GOOGLE_ADS_CREDENTIALS_JSON` → enable **Google Analytics Data API** and **Google Analytics Admin API**.
+2. In GA4 → **Admin → Property access management** → add the service account `client_email` as **Viewer**.
+3. Set `GOOGLE_GA4_PROPERTY_ID` on Render (numeric ID from Admin → Property settings, e.g. `123456789`).
+4. After deploy, call `list_ga4_properties` to verify, then `get_ga4_landing_page_performance` or `get_ga4_traffic_acquisition`.
+
+GA4 uses **`analytics.readonly`** scope on the same service account JSON.
+
+**GA4 MCP tools:** `list_ga4_properties`, `run_ga4_report`, `get_ga4_landing_page_performance`, `get_ga4_traffic_acquisition`, `get_ga4_organic_vs_paid`, `list_ga4_conversion_events`.
+
 ### Google Sheets setup
 
 1. GCP Console → same project as `GOOGLE_ADS_CREDENTIALS_JSON` → enable **Google Sheets API** (and optionally **Google Drive API**).

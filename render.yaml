@@ -31,6 +31,8 @@ services:
         value: "E-mail leads"
       - key: GOOGLE_SHEETS_LEAD_PIPELINE_TAB
         value: "Lead Pipeline"
+      - key: GOOGLE_GA4_PROPERTY_ID
+        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
