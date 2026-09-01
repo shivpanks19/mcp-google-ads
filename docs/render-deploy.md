@@ -10,6 +10,18 @@ Host the Google Ads MCP server as a **Web Service** with **streamable HTTP** so 
 4. Google Ads **developer token** (Basic/Standard for Keyword Planner)
 5. Service account email invited in Google Ads: **Tools & settings → Access and security → Users** with **Standard** (edit) access if you use campaign mutate tools on Render
 6. **Google Sheets API** enabled in the same GCP project as the service account; E-mail leads spreadsheet **shared** with the service account email (Viewer or Editor)
+7. **Google Search Console API** enabled in the same GCP project; add the service account email as a user on each GSC property (Settings → Users and permissions)
+
+### Google Search Console setup
+
+1. GCP Console → same project as `GOOGLE_ADS_CREDENTIALS_JSON` → enable **Google Search Console API**.
+2. In [Search Console](https://search.google.com/search-console) → property → **Settings → Users and permissions** → add the service account `client_email` (e.g. `google-ads-sa@crm-demo-2fc0c.iam.gserviceaccount.com`).
+3. Note the **exact** property URL (`https://example.com/` vs `sc-domain:example.com`) — MCP tools require an exact match.
+4. After deploy, call MCP tool `list_search_console_sites` to verify, then `get_search_console_analytics(site_url=..., dimension="query")`.
+
+GSC uses **`webmasters.readonly`** scope by default on the same service account JSON. Set `GSC_SCOPE=full` on Render only if you need sitemap submit (not exposed as MCP tool yet).
+
+**Search Console MCP tools:** `list_search_console_sites`, `get_search_console_analytics`, `get_search_console_page_query_map`, `inspect_search_console_url`, `list_search_console_sitemaps`.
 
 ### Google Sheets setup
 
