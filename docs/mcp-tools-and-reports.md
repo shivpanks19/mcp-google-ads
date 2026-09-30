@@ -24,6 +24,8 @@ This document describes what the **Google Ads MCP** exposes: there is no separat
 | `get_asset_usage` | Where assets are used in the account. |
 | `analyze_image_assets` | Image-focused performance-style analysis over a period. |
 | `list_resources` | Discover valid GAQL `FROM` resources (not a performance report). |
+| `get_auction_insights` | **Auction Insights (Search):** competitor domains + `metrics.auction_insight_search_*` via `segments.auction_insight_domain` on `customer` / `campaign` / `ad_group` / `keyword_view`. Supports `granularity`: total, daily, weekly, **monthly**, **quarterly**. |
+| `get_auction_insights_competitor_ranking` | Aggregated top competitor domains by avg auction impression share (compact JSON for planning). |
 | `generate_keyword_ideas` | **Keyword Planner:** discover ideas from seed keywords, a page URL, or a site; returns volume, competition, CPC ranges. |
 | `get_keyword_metrics` | **Keyword Planner:** historical metrics for an explicit keyword list (search volume, competition, bids). |
 | `suggest_geo_targets` | Resolve location names (e.g. India, Mumbai) to `geoTargetConstants/…` resource names. |

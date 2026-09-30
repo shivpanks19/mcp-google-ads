@@ -2175,6 +2175,7 @@ import ppc_manager_tools  # noqa: E402, F401
 import sheets_tools  # noqa: E402, F401
 import search_console_tools  # noqa: E402, F401
 import ga4_tools  # noqa: E402, F401
+import auction_insight_tools  # noqa: E402, F401
 
 if __name__ == "__main__":
     # Start the MCP server on stdio transport

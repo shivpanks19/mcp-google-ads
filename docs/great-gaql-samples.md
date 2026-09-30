@@ -140,6 +140,30 @@ ORDER BY
 
 This query helps identify keywords that are performing well but may be limited by impression share, indicating opportunities for bid or budget adjustments.
 
+### 4b. Auction Insights (competitor domains — use MCP `get_auction_insights`)
+
+Do **not** use `FROM auction_insight_view` (invalid). Select competitor metrics on a normal resource with `segments.auction_insight_domain`:
+
+```sql
+SELECT
+  campaign.id,
+  campaign.name,
+  segments.auction_insight_domain,
+  segments.month,
+  segments.year,
+  metrics.auction_insight_search_impression_share,
+  metrics.auction_insight_search_outranking_share,
+  metrics.auction_insight_search_position_above_rate
+FROM campaign
+WHERE
+  campaign.advertising_channel_type = 'SEARCH'
+  AND segments.date DURING LAST_90_DAYS
+ORDER BY metrics.auction_insight_search_impression_share DESC
+LIMIT 500
+```
+
+If the API returns `UNRECOGNIZED_FIELD` on `auction_insight_*` metrics, your developer token may not have Auction Insights API access; use `search_rank_lost_impression_share` as a proxy or export from the Google Ads UI.
+
 ### 5. Complex Audience Segmentation Performance Analysis
 
 ```sql
