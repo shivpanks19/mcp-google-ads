@@ -2175,7 +2175,27 @@ import ppc_manager_tools  # noqa: E402, F401
 import sheets_tools  # noqa: E402, F401
 import search_console_tools  # noqa: E402, F401
 import ga4_tools  # noqa: E402, F401
-import auction_insight_tools  # noqa: E402, F401
+
+
+def register_auction_insight_tools() -> None:
+    """Register auction insight tools after plugin modules load (avoids circular import)."""
+    if getattr(register_auction_insight_tools, "_done", False):
+        return
+    from auction_insight_tools import (  # noqa: WPS433
+        get_auction_insights,
+        get_auction_insights_competitor_ranking,
+    )
+
+    mcp.tool()(get_auction_insights)
+    mcp.tool()(get_auction_insights_competitor_ranking)
+    register_auction_insight_tools._done = True  # type: ignore[attr-defined]
+    logger.info(
+        "Registered auction insight MCP tools: get_auction_insights, "
+        "get_auction_insights_competitor_ranking"
+    )
+
+
+register_auction_insight_tools()
 
 if __name__ == "__main__":
     # Start the MCP server on stdio transport

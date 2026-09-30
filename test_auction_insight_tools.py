@@ -55,6 +55,12 @@ class TestAuctionInsightGaql(unittest.TestCase):
     def test_unavailable_error_detection(self) -> None:
         err = '{"error":{"details":[{"errors":[{"message":"Unrecognized field","errorCode":{"queryError":"UNRECOGNIZED_FIELD"}}]}]}} auction_insight'
         self.assertTrue(ait._auction_insights_unavailable(err))
+        err2 = (
+            '{"error":{"details":[{"errors":[{"message":"METRIC_ACCESS_DENIED",'
+            '"errorCode":{"authorizationError":"METRIC_ACCESS_DENIED"}}]}]}} '
+            "auction_insight_search_impression_share"
+        )
+        self.assertTrue(ait._auction_insights_unavailable(err2))
 
 
 if __name__ == "__main__":

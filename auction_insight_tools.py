@@ -14,13 +14,6 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import Field
 
-from google_ads_server import (
-    _format_execute_gaql_table,
-    _gaql_search_raw,
-    format_customer_id,
-    mcp,
-)
-
 Level = Literal["customer", "campaign", "ad_group", "keyword"]
 Granularity = Literal["total", "daily", "weekly", "monthly", "quarterly"]
 
@@ -101,6 +94,7 @@ def _auction_insights_unavailable(err_text: str) -> bool:
         or "prohibited" in lower
         or "not publicly available" in lower
         or "permission" in lower
+        or "metric_access_denied" in lower
     ):
         return True
     if "bad_resource_type" in lower and "auction_insight" in lower:
@@ -236,6 +230,8 @@ def fetch_auction_insights_raw(
     search_only: bool = True,
     limit: int = 5000,
 ) -> Dict[str, Any]:
+    from google_ads_server import _gaql_search_raw, format_customer_id
+
     formatted = format_customer_id(customer_id)
     try:
         query = build_auction_insight_gaql(
@@ -280,12 +276,13 @@ def fetch_auction_insights_raw(
 
 
 def _format_auction_insight_table(formatted_customer_id: str, rows: List[Dict[str, Any]]) -> str:
+    from google_ads_server import _format_execute_gaql_table
+
     if not rows:
         return f"No auction insight rows for account {formatted_customer_id} (threshold or date range)."
     return _format_execute_gaql_table(formatted_customer_id, rows)
 
 
-@mcp.tool()
 async def get_auction_insights(
     customer_id: str = Field(
         description="Google Ads customer ID (10 digits, no dashes). Example: '2696255703'"
@@ -400,7 +397,6 @@ async def get_auction_insights(
     )
 
 
-@mcp.tool()
 async def get_auction_insights_competitor_ranking(
     customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)"),
     days: int = Field(default=30, description="7, 14, 30, 60, 90, or 180 days"),
