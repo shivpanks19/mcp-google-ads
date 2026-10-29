@@ -42,6 +42,18 @@ class YouTubeHelpersTest(unittest.TestCase):
         reset_youtube_caches()
         self.assertEqual(_default_privacy(), "unlisted")
 
+    def test_auth_readiness_unconfigured(self):
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {}, clear=True):
+            from youtube_tools import reset_youtube_caches, youtube_auth_readiness
+
+            reset_youtube_caches()
+            status = youtube_auth_readiness()
+            self.assertFalse(status["ready"])
+            self.assertFalse(status["configured"])
+
 
 if __name__ == "__main__":
     unittest.main()

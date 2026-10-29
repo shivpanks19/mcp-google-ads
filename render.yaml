@@ -33,6 +33,10 @@ services:
         value: "Lead Pipeline"
       - key: GOOGLE_GA4_PROPERTY_ID
         sync: false
+      - key: YOUTUBE_CREDENTIALS_JSON
+        sync: false
+      - key: YOUTUBE_DEFAULT_PRIVACY
+        value: unlisted
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY

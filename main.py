@@ -31,6 +31,14 @@ async def health(_request: Request) -> JSONResponse:
         tool_names = sorted(t.name for t in tools)
     except Exception:
         tool_names = []
+    youtube_status: dict = {}
+    try:
+        from youtube_tools import youtube_auth_readiness
+
+        youtube_status = youtube_auth_readiness()
+    except Exception as exc:
+        youtube_status = {"ready": False, "error": f"{type(exc).__name__}: {exc}"}
+
     return JSONResponse(
         {
             "status": "ok",
@@ -50,6 +58,10 @@ async def health(_request: Request) -> JSONResponse:
                 for n in tool_names
                 if n.startswith("get_auction_insights")
             ],
+            "youtube_tools": [
+                n for n in tool_names if "youtube" in n.lower()
+            ],
+            "youtube_auth": youtube_status,
         }
     )
 

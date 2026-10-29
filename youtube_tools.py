@@ -188,6 +188,75 @@ def _guess_mimetype(path: Path) -> str:
     return guessed or "video/mp4"
 
 
+def _load_stored_user_token_dict() -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Return (authorized_user_token_dict, source_label) without network I/O."""
+    blob = _load_youtube_json_env()
+    if blob:
+        if blob.get("type") == "service_account":
+            return None, "YOUTUBE_CREDENTIALS_JSON(service_account)"
+        if "installed" in blob or "web" in blob:
+            return None, "YOUTUBE_CREDENTIALS_JSON(oauth_client_only)"
+        return blob, "YOUTUBE_CREDENTIALS_JSON"
+
+    token_path = _youtube_token_path()
+    if os.path.isfile(token_path):
+        try:
+            with open(token_path, encoding="utf-8") as f:
+                token_data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None, "YOUTUBE_TOKEN_PATH(invalid)"
+        if isinstance(token_data, dict) and "installed" not in token_data and "web" not in token_data:
+            return token_data, "YOUTUBE_TOKEN_PATH"
+    return None, None
+
+
+def youtube_auth_readiness() -> Dict[str, Any]:
+    """
+    Non-secret status for /health and local checks.
+    Render only needs refresh_token in YOUTUBE_CREDENTIALS_JSON once; access tokens refresh in RAM.
+    """
+    token_dict, source = _load_stored_user_token_dict()
+    if source and source.endswith("(service_account)"):
+        return {
+            "configured": True,
+            "ready": False,
+            "source": source,
+            "has_refresh_token": False,
+            "message": "Use OAuth user JSON, not the Google Ads service account key.",
+        }
+    if source and source.endswith("(oauth_client_only)"):
+        return {
+            "configured": True,
+            "ready": False,
+            "source": source,
+            "has_refresh_token": False,
+            "message": "YOUTUBE_CREDENTIALS_JSON is OAuth client config only; run run_youtube_oauth_login.py.",
+        }
+    if not token_dict:
+        return {
+            "configured": False,
+            "ready": False,
+            "source": None,
+            "has_refresh_token": False,
+            "message": "Set YOUTUBE_CREDENTIALS_JSON on Render or run scripts/run_youtube_oauth_login.py locally.",
+        }
+
+    has_refresh = bool(token_dict.get("refresh_token"))
+    return {
+        "configured": True,
+        "ready": has_refresh,
+        "source": source,
+        "has_refresh_token": has_refresh,
+        "token_expiry_present": bool(token_dict.get("expiry") or token_dict.get("token")),
+        "refresh_on_server": "automatic (google-auth refresh; no Render env sync required)",
+        "message": (
+            "OK for hosted uploads."
+            if has_refresh
+            else "Missing refresh_token — re-run OAuth with scripts/run_youtube_oauth_login.py --force"
+        ),
+    }
+
+
 def get_youtube_credentials() -> Credentials:
     global _youtube_credentials_cache
     if _youtube_credentials_cache is not None and _youtube_credentials_cache.valid:
@@ -235,7 +304,11 @@ def get_youtube_credentials() -> Credentials:
                     "Authorize locally and set YOUTUBE_CREDENTIALS_JSON."
                 )
             flow = InstalledAppFlow.from_client_config(client_config, YOUTUBE_SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = flow.run_local_server(
+                port=0,
+                access_type="offline",
+                prompt="consent",
+            )
 
         parent = os.path.dirname(token_path)
         if parent:

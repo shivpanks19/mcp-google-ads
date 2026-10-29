@@ -44,7 +44,8 @@ def main() -> None:
     get_youtube_credentials()
     token_path = _youtube_token_path()
     print(f"YouTube OAuth finished. Token saved to: {token_path}")
-    print("For hosted MCP, set YOUTUBE_CREDENTIALS_JSON to that file contents (one line).")
+    print("Export for Render:")
+    print("  .venv/bin/python scripts/export_youtube_token_for_render.py")
 
 
 if __name__ == "__main__":
