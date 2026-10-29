@@ -2175,6 +2175,7 @@ import ppc_manager_tools  # noqa: E402, F401
 import sheets_tools  # noqa: E402, F401
 import search_console_tools  # noqa: E402, F401
 import ga4_tools  # noqa: E402, F401
+import youtube_tools  # noqa: E402, F401
 
 
 def register_auction_insight_tools() -> None:
